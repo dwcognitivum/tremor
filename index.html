@@ -56,6 +56,10 @@
   .gate.still .dot { background: #fff; }
   .gate.moving { background: #D0342C; color: #fff; }
   .gate.moving .dot { background: #fff; }
+  .gate.walking { background: #C9821A; color: #fff; }
+  .gate.walking .dot { background: #fff; }
+  .toggle { flex: 1; }
+  .toggle[aria-pressed="true"] { background: var(--ink); color: #fff; border-color: var(--ink); }
   .readings { transition: opacity 0.2s; }
   .readings.dim { opacity: 0.35; }
   figure { position: relative; }
@@ -89,6 +93,9 @@
     <button id="win5" aria-pressed="true">5 s</button>
   </div>
 </div>
+<div class="row">
+  <button class="secondary toggle" id="gaitBtn" aria-pressed="false">Gait subtraction off</button>
+</div>
 
 <div class="readings">
   <div class="reading"><b id="peak"></b><small>peak, Hz</small></div>
@@ -116,11 +123,11 @@
 <div class="row">
   <button class="secondary" id="csvBtn" disabled>Save CSV</button>
 </div>
-<p class="note">Browsers deliver motion at about 60 samples a second on both iPhone and Android, which is enough to resolve 12 Hz. The page needs HTTPS. On iPhone, Safari asks for motion access when you tap Start. Save CSV keeps about the first ten minutes of the raw, evenly resampled signal.</p>
+<p class="note">Browsers deliver motion at about 60 samples a second on both iPhone and Android, which is enough to resolve 12 Hz. The page needs HTTPS. On iPhone, Safari asks for motion access when you tap Start. Save CSV keeps about the first ten minutes of the raw, evenly resampled signal, before any gait subtraction. Gait subtraction learns the repeating waveform of each step from the accelerometer's rhythm and removes it before filtering; it needs a steady walk of about ten steps to lock on.</p>
 
 <script>
 (() => {
-  const VERSION = 5;   // bump this on every change to the page
+  const VERSION = 6;   // bump this on every change to the page
   let bandLo = 4, bandHi = 12, spanSec = 5;
   const N = 1024;          // ring buffer length in samples
   const MAX_ROWS = 40000;  // CSV cap
@@ -131,7 +138,7 @@
     peak: $('peak'), rms: $('rms'), share: $('share'), rate: $('rate'), rmsLabel: $('rmsLabel'),
     status: $('status'), csv: $('csvBtn'), trace: $('trace'), spec: $('spec'), traceCap: $('traceCap'), specCap: $('specCap'),
     bandWide: $('bandWide'), bandMicro: $('bandMicro'), win2: $('win2'), win5: $('win5'),
-    readings: document.querySelector('.readings'), gate: $('gate'), gateText: $('gateText'), ver: $('ver')
+    readings: document.querySelector('.readings'), gate: $('gate'), gateText: $('gateText'), ver: $('ver'), gaitBtn: $('gaitBtn')
   };
   const css = name => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
   const C = {
@@ -151,7 +158,86 @@
 
   // Movement gate: 0.3 to 4 Hz accelerometer power, with hysteresis
   const GATE_ON = 0.25, GATE_OFF = 0.15;   // m/s² RMS
-  let gateChains = null, gateEma = 0, moving = false;
+  let gateChains = null, gateEma = 0, moving = false, gateLive = true, lastEventT = 0;
+
+  // Gait subtraction: per-step templates (two, one per foot) learned from the raw signal
+  const BINS = 64;
+  let gaitOn = false, stepChain = null;
+  const step = { p1: 0, p2: 0, t1: 0, t2: 0, lastT: -10, peakEma: 0 };
+  const gait = {
+    lastStepT: null, seg: [], count: [0, 0], next: 0, pred: 0, expDur: 0, irregular: 0,
+    templ: [0, 1].map(() => [0, 1, 2].map(() => new Float32Array(BINS)))
+  };
+  function resetGait() {
+    gait.lastStepT = null; gait.seg = []; gait.count = [0, 0]; gait.next = 0; gait.pred = 0; gait.expDur = 0; gait.irregular = 0;
+    for (const tk of gait.templ) for (const ax of tk) ax.fill(0);
+    step.p1 = 0; step.p2 = 0; step.lastT = -10; step.peakEma = 0;
+  }
+  function gaitMature() { return gaitOn && gait.count[0] >= 3 && gait.count[1] >= 3; }
+  function gaitRecent() { return gait.lastStepT !== null && (lastEventT - gait.lastStepT) < 1.5 && (gait.count[0] + gait.count[1]) >= 2; }
+  function segToBins(seg, start, dur) {
+    const bins = [0, 1, 2].map(() => new Float32Array(BINS));
+    let j = 0;
+    for (let b = 0; b < BINS; b++) {
+      const tb = start + (b + 0.5) / BINS * dur;
+      while (j < seg.length - 1 && seg[j + 1][0] <= tb) j++;
+      const pnt = seg[j], q = seg[Math.min(j + 1, seg.length - 1)];
+      const span = q[0] - pnt[0];
+      const w = span > 0 ? Math.min(1, Math.max(0, (tb - pnt[0]) / span)) : 0;
+      for (let i = 0; i < 3; i++) bins[i][b] = pnt[i + 1] + w * (q[i + 1] - pnt[i + 1]);
+    }
+    return bins;
+  }
+  function templDist(a, b) {
+    let d = 0;
+    for (let i = 0; i < 3; i++) for (let k = 0; k < BINS; k++) { const e = a[i][k] - b[i][k]; d += e * e; }
+    return d;
+  }
+  function onStep(ts) {
+    if (gait.lastStepT !== null) {
+      const dur = ts - gait.lastStepT;
+      const regular = gait.expDur === 0 || Math.abs(dur - gait.expDur) < 0.3 * gait.expDur;
+      if (dur >= 0.3 && dur <= 1.0 && regular && gait.seg.length >= 6) {
+        const bins = segToBins(gait.seg, gait.lastStepT, dur);
+        let k;
+        if (gait.count[0] >= 2 && gait.count[1] >= 2) k = templDist(bins, gait.templ[0]) <= templDist(bins, gait.templ[1]) ? 0 : 1;
+        else k = gait.next;
+        const n = gait.count[k], alpha = n < 8 ? 1 / (n + 1) : 0.1;   // slow averaging so tremor doesn't leak into the template
+        for (let i = 0; i < 3; i++) for (let b = 0; b < BINS; b++) gait.templ[k][i][b] += alpha * (bins[i][b] - gait.templ[k][i][b]);
+        gait.count[k]++;
+        gait.next = 1 - k;
+        gait.expDur = gait.expDur > 0 ? 0.7 * gait.expDur + 0.3 * dur : dur;
+        gait.irregular = 0;
+      } else {
+        gait.irregular++;
+        if (gait.irregular >= 3) resetGait();
+      }
+    }
+    gait.lastStepT = ts; gait.pred = gait.next; gait.seg = [];
+    refreshGate();
+  }
+  function detectStep(mag, t) {
+    if (!stepChain) return;
+    let sv = mag;
+    for (const b of stepChain) sv = b.run(sv);
+    const thresh = Math.max(0.3, 0.3 * step.peakEma);
+    if (step.p1 > step.p2 && step.p1 >= sv && step.p1 > thresh && (step.t1 - step.lastT) > 0.25) {
+      step.peakEma = step.peakEma > 0 ? 0.8 * step.peakEma + 0.2 * step.p1 : step.p1;
+      step.lastT = step.t1;
+      onStep(step.t1);
+    }
+    step.p2 = step.p1; step.t2 = step.t1; step.p1 = sv; step.t1 = t;
+  }
+  function gaitSubtract(orig, tg) {
+    if (!gaitOn || gait.lastStepT === null) return orig;
+    if (gait.seg.length < 600) gait.seg.push([tg, orig[0], orig[1], orig[2]]);
+    if (gait.expDur <= 0 || gait.count[gait.pred] < 3) return orig;
+    const ph = (tg - gait.lastStepT) / gait.expDur;
+    if (ph >= 1.25) return orig;
+    const bin = Math.min(BINS - 1, Math.floor(ph * BINS));
+    const tpl = gait.templ[gait.pred];
+    return [orig[0] - tpl[0][bin], orig[1] - tpl[1][bin], orig[2] - tpl[2][bin]];
+  }
 
   const unit = () => sensor === 'gyro' ? 'deg/s' : 'm/s²';
   const floorScale = () => sensor === 'gyro' ? 1.5 : 0.03;
@@ -183,6 +269,7 @@
     head = 0; count = 0; psdS = null; yScale = 0; rows = []; lastRaw = null; gridT = null; t0 = null;
     chains = [makeChain(), makeChain(), makeChain()];
     stats = { peak: null, rms: 0, share: 0 };
+    resetGait();
   }
 
   // ---------- sensor input, resampled onto a uniform grid ----------
@@ -191,7 +278,7 @@
     if (sensor === 'gyro') return (r && r.alpha != null) ? [r.alpha, r.beta, r.gamma] : null;
     return (a && a.x != null) ? [a.x, a.y, a.z] : null;
   }
-  function updateGate(e) {
+  function updateGate(e, t) {
     if (!gateChains) return;
     const a = (e.acceleration && e.acceleration.x != null) ? e.acceleration : e.accelerationIncludingGravity;
     if (!a || a.x == null) return;
@@ -204,14 +291,24 @@
     }
     gateEma += (ss - gateEma) / fs;   // about a one-second time constant
     const rms = Math.sqrt(gateEma);
-    if (!moving && rms > GATE_ON) setMoving(true);
-    else if (moving && rms < GATE_OFF) setMoving(false);
+    let changed = false;
+    if (!moving && rms > GATE_ON) { moving = true; changed = true; }
+    else if (moving && rms < GATE_OFF) { moving = false; changed = true; }
+    if (gaitOn) detectStep(Math.sqrt(vals[0] * vals[0] + vals[1] * vals[1] + vals[2] * vals[2]), t);
+    if (changed) refreshGate();
   }
-  function setMoving(state) {
-    moving = state;
-    ui.gate.className = 'gate ' + (state ? 'moving' : 'still');
-    ui.gateText.textContent = state ? 'Moving. Readings paused, this is not tremor.' : 'Still';
-    ui.readings.classList.toggle('dim', state);
+  function refreshGate() {
+    if (!gateChains) return;
+    const walking = gaitOn && gaitRecent();
+    const mature = walking && gaitMature();
+    let cls, text;
+    if (moving && walking) { cls = 'walking'; text = mature ? 'Walking. Gait subtracted, readings live.' : 'Walking. Learning your stride.'; }
+    else if (moving) { cls = 'moving'; text = gaitOn ? 'Moving, no steady steps. Readings paused.' : 'Moving. Readings paused, this is not tremor.'; }
+    else { cls = 'still'; text = 'Still'; }
+    gateLive = !moving || mature;
+    ui.gate.className = 'gate ' + cls;
+    ui.gateText.textContent = text;
+    ui.readings.classList.toggle('dim', !gateLive);
   }
   function setGateIdle(text) {
     ui.gate.className = 'gate';
@@ -219,7 +316,9 @@
     ui.readings.classList.remove('dim');
   }
   function onMotion(e) {
-    updateGate(e);
+    const t = ((e.timeStamp && e.timeStamp < 1e12) ? e.timeStamp : performance.now()) / 1000;
+    lastEventT = t;
+    updateGate(e, t);
     const v = readSample(e);
     if (!v) {
       missing++;
@@ -230,7 +329,6 @@
       return;
     }
     gotEvents = true;
-    const t = ((e.timeStamp && e.timeStamp < 1e12) ? e.timeStamp : performance.now()) / 1000;
 
     if (calibrating) {
       if (lastRaw) intervals.push(t - lastRaw.t);
@@ -244,16 +342,18 @@
     const dt = 1 / fs;
     while (gridT <= t) {
       const a = (gridT - lastRaw.t) / (t - lastRaw.t);
+      const orig = [0, 0, 0];
+      for (let i = 0; i < 3; i++) orig[i] = lastRaw.v[i] + a * (v[i] - lastRaw.v[i]);
+      const proc = gaitSubtract(orig, gridT);
       for (let i = 0; i < 3; i++) {
-        const x = lastRaw.v[i] + a * (v[i] - lastRaw.v[i]);
-        raw[i][head] = x;
-        let y = x;
+        raw[i][head] = proc[i];
+        let y = proc[i];
         for (const b of chains[i]) y = b.run(y);
         filt[i][head] = y;
       }
       if (t0 === null) t0 = gridT;
       if (rows.length < MAX_ROWS) {
-        rows.push([(gridT - t0).toFixed(4), raw[0][head].toFixed(4), raw[1][head].toFixed(4), raw[2][head].toFixed(4)]);
+        rows.push([(gridT - t0).toFixed(4), orig[0].toFixed(4), orig[1].toFixed(4), orig[2].toFixed(4)]);
       }
       head = (head + 1) % N; count++; gridT += dt;
     }
@@ -270,7 +370,8 @@
     resetBuffers();
     ui.rate.textContent = fs;
     gateChains = [0, 1, 2].map(() => [biquad('hp', 0.3, fs, 0.7071), biquad('lp', 4, fs, 0.7071)]);
-    gateEma = 0; moving = false; setMoving(false);
+    stepChain = [biquad('hp', 0.5, fs, 0.7071), biquad('lp', 3, fs, 0.7071)];
+    gateEma = 0; moving = false; resetGait(); refreshGate();
     status('Live. Keep still for a few seconds and watch the trace settle.');
     anaTimer = setInterval(analyse, 250);
   }
@@ -303,6 +404,7 @@
     }
   }
   function analyse() {
+    refreshGate();
     const L = Math.min(count, Math.round(3 * fs), NFFT);
     if (L < fs) return;
     const base = (head - L + N) % N;
@@ -346,7 +448,7 @@
       ss += filt[0][j] * filt[0][j] + filt[1][j] * filt[1][j] + filt[2][j] * filt[2][j];
     }
     stats = { peak, rms: Math.sqrt(ss / L), share: totP > 0 ? bandP / totP : 0 };
-    if (moving) return;
+    if (!gateLive) return;
     ui.peak.textContent = peak != null ? peak.toFixed(1) : '';
     ui.rms.textContent = stats.rms.toFixed(sensor === 'gyro' ? 2 : 3);
     ui.share.textContent = Math.round(stats.share * 100);
@@ -503,6 +605,14 @@
     updateCaptions();
     if (!running) drawTrace();
   }
+  function setGait(on) {
+    if (on === gaitOn) return;
+    gaitOn = on;
+    ui.gaitBtn.setAttribute('aria-pressed', String(on));
+    ui.gaitBtn.textContent = on ? 'Gait subtraction on' : 'Gait subtraction off';
+    resetGait();
+    refreshGate();
+  }
   function setSensor(s) {
     if (s === sensor) return;
     sensor = s;
@@ -580,6 +690,7 @@
   ui.bandMicro.addEventListener('click', () => setBand(8, 12));
   ui.win2.addEventListener('click', () => setWindow(2));
   ui.win5.addEventListener('click', () => setWindow(5));
+  ui.gaitBtn.addEventListener('click', () => setGait(!gaitOn));
   window.addEventListener('resize', () => { if (!running) { drawTrace(); drawSpec(); } });
   ui.ver.textContent = 'v' + VERSION;
   drawTrace(); drawSpec();
