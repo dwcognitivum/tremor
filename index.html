@@ -34,7 +34,8 @@
     flex-direction: column;
     gap: 14px;
   }
-  h1 { font-size: 22px; font-weight: 600; letter-spacing: -0.01em; }
+  h1 { font-size: 22px; font-weight: 600; letter-spacing: -0.01em; display: flex; align-items: baseline; gap: 10px; }
+  .ver { font-size: 13px; font-weight: 500; color: var(--muted); }
   .sub { color: var(--muted); font-size: 14px; margin-top: -8px; }
   .row { display: flex; gap: 10px; align-items: stretch; }
   button { font: inherit; border: 0; border-radius: 6px; cursor: pointer; -webkit-tap-highlight-color: transparent; touch-action: manipulation; }
@@ -68,7 +69,7 @@
 </style>
 </head>
 <body>
-<h1>Micro tremor</h1>
+<h1>Micro tremor <span class="ver" id="ver"></span></h1>
 <p class="sub">Hold the phone in one hand with your arm relaxed, then tap Start.</p>
 
 <div class="row">
@@ -119,6 +120,7 @@
 
 <script>
 (() => {
+  const VERSION = 5;   // bump this on every change to the page
   let bandLo = 4, bandHi = 12, spanSec = 5;
   const N = 1024;          // ring buffer length in samples
   const MAX_ROWS = 40000;  // CSV cap
@@ -129,7 +131,7 @@
     peak: $('peak'), rms: $('rms'), share: $('share'), rate: $('rate'), rmsLabel: $('rmsLabel'),
     status: $('status'), csv: $('csvBtn'), trace: $('trace'), spec: $('spec'), traceCap: $('traceCap'), specCap: $('specCap'),
     bandWide: $('bandWide'), bandMicro: $('bandMicro'), win2: $('win2'), win5: $('win5'),
-    readings: document.querySelector('.readings'), gate: $('gate'), gateText: $('gateText')
+    readings: document.querySelector('.readings'), gate: $('gate'), gateText: $('gateText'), ver: $('ver')
   };
   const css = name => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
   const C = {
@@ -565,7 +567,7 @@
     const blob = new Blob([header + rows.map(r => r.join(',')).join('\n')], { type: 'text/csv' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
-    a.download = 'tremor_' + sensor + '_' + fs + 'hz.csv';
+    a.download = 'tremor_v' + VERSION + '_' + sensor + '_' + fs + 'hz.csv';
     document.body.appendChild(a); a.click(); a.remove();
     setTimeout(() => URL.revokeObjectURL(a.href), 2000);
   }
@@ -579,6 +581,7 @@
   ui.win2.addEventListener('click', () => setWindow(2));
   ui.win5.addEventListener('click', () => setWindow(5));
   window.addEventListener('resize', () => { if (!running) { drawTrace(); drawSpec(); } });
+  ui.ver.textContent = 'v' + VERSION;
   drawTrace(); drawSpec();
 })();
 </script>
