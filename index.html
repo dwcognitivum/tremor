@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="theme-color" content="#EEF1F4">
-<title>Tremor band, 4 to 12 Hz</title>
+<title>Micro tremor</title>
 <style>
   :root {
     --paper: #EEF1F4;
@@ -43,12 +43,19 @@
   .secondary { background: transparent; color: var(--ink); border: 1.5px solid var(--rule); padding: 12px 16px; font-size: 15px; }
   .secondary:disabled { opacity: 0.4; cursor: default; }
   .seg { display: inline-flex; border: 1.5px solid var(--rule); border-radius: 6px; overflow: hidden; }
-  .seg button { background: transparent; color: var(--muted); padding: 0 14px; font-size: 14px; border-radius: 0; }
+  .seg button { background: transparent; color: var(--muted); padding: 10px 14px; font-size: 14px; border-radius: 0; }
   .seg button[aria-pressed="true"] { background: var(--ink); color: #fff; }
   .readings { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
   .reading { border-top: 2px solid var(--ink); padding-top: 6px; }
   .reading b { display: block; font-size: 24px; font-weight: 600; font-variant-numeric: tabular-nums; line-height: 1.1; min-height: 1.1em; }
   .reading small { display: block; color: var(--muted); font-size: 12px; margin-top: 2px; }
+  .gate { display: flex; align-items: center; gap: 8px; font-size: 14px; color: var(--muted); min-height: 1.4em; }
+  .gate .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--rule); flex: none; }
+  .gate.still .dot { background: var(--ink-2); }
+  .gate.moving { color: var(--mark); }
+  .gate.moving .dot { background: var(--mark); }
+  .readings { transition: opacity 0.2s; }
+  .readings.dim { opacity: 0.35; }
   figure { position: relative; }
   figure canvas { display: block; width: 100%; background: var(--panel); border: 1.5px solid var(--rule); border-radius: 4px; }
   figcaption { position: absolute; top: 8px; left: 12px; right: 12px; font-size: 12px; color: var(--muted); pointer-events: none; display: flex; gap: 8px; align-items: center; }
@@ -60,7 +67,7 @@
 </style>
 </head>
 <body>
-<h1>Tremor band, 4 to 12 Hz</h1>
+<h1>Micro tremor</h1>
 <p class="sub">Hold the phone in one hand with your arm relaxed, then tap Start.</p>
 
 <div class="row">
@@ -70,6 +77,16 @@
     <button id="accelBtn" aria-pressed="false">Accel</button>
   </div>
 </div>
+<div class="row">
+  <div class="seg" role="group" aria-label="Band">
+    <button id="bandWide" aria-pressed="true">4 to 12 Hz</button>
+    <button id="bandMicro" aria-pressed="false">8 to 12 Hz</button>
+  </div>
+  <div class="seg" role="group" aria-label="Window">
+    <button id="win2" aria-pressed="false">2 s</button>
+    <button id="win5" aria-pressed="true">5 s</button>
+  </div>
+</div>
 
 <div class="readings">
   <div class="reading"><b id="peak"></b><small>peak, Hz</small></div>
@@ -77,6 +94,7 @@
   <div class="reading"><b id="share"></b><small>in band, %</small></div>
   <div class="reading"><b id="rate"></b><small>samples/s</small></div>
 </div>
+<div class="gate" id="gate"><span class="dot"></span><span id="gateText"></span></div>
 
 <figure>
   <canvas id="trace"></canvas>
@@ -89,7 +107,7 @@
 </figure>
 <figure>
   <canvas id="spec"></canvas>
-  <figcaption>Spectrum of the raw signal, last 3 s. Shaded area is 4 to 12 Hz.</figcaption>
+  <figcaption id="specCap">Spectrum of the raw signal, last 3 s. Shaded area is 4 to 12 Hz.</figcaption>
 </figure>
 
 <p class="status" id="status"></p>
@@ -100,7 +118,7 @@
 
 <script>
 (() => {
-  const BAND_LO = 4, BAND_HI = 12;
+  let bandLo = 4, bandHi = 12, spanSec = 5;
   const N = 1024;          // ring buffer length in samples
   const MAX_ROWS = 40000;  // CSV cap
 
@@ -108,7 +126,9 @@
   const ui = {
     start: $('startBtn'), gyro: $('gyroBtn'), accel: $('accelBtn'),
     peak: $('peak'), rms: $('rms'), share: $('share'), rate: $('rate'), rmsLabel: $('rmsLabel'),
-    status: $('status'), csv: $('csvBtn'), trace: $('trace'), spec: $('spec'), traceCap: $('traceCap')
+    status: $('status'), csv: $('csvBtn'), trace: $('trace'), spec: $('spec'), traceCap: $('traceCap'), specCap: $('specCap'),
+    bandWide: $('bandWide'), bandMicro: $('bandMicro'), win2: $('win2'), win5: $('win5'),
+    readings: document.querySelector('.readings'), gate: $('gate'), gateText: $('gateText')
   };
   const css = name => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
   const C = {
@@ -125,6 +145,10 @@
   let head = 0, count = 0, chains = null, psdS = null, yScale = 0, rows = [];
   let stats = { peak: null, rms: 0, share: 0 };
   let rafId = null, anaTimer = null, noEventTimer = null, wakeLock = null, lastDraw = 0;
+
+  // Movement gate: 0.3 to 4 Hz accelerometer power, with hysteresis
+  const GATE_ON = 0.25, GATE_OFF = 0.15;   // m/s² RMS
+  let gateChains = null, gateEma = 0, moving = false;
 
   const unit = () => sensor === 'gyro' ? 'deg/s' : 'm/s²';
   const floorScale = () => sensor === 'gyro' ? 1.5 : 0.03;
@@ -150,7 +174,7 @@
   }
   function makeChain() {
     const Q1 = 0.5412, Q2 = 1.3066; // Butterworth section Q values for a 4th-order response
-    return [biquad('hp', BAND_LO, fs, Q1), biquad('hp', BAND_LO, fs, Q2), biquad('lp', BAND_HI, fs, Q1), biquad('lp', BAND_HI, fs, Q2)];
+    return [biquad('hp', bandLo, fs, Q1), biquad('hp', bandLo, fs, Q2), biquad('lp', bandHi, fs, Q1), biquad('lp', bandHi, fs, Q2)];
   }
   function resetBuffers() {
     head = 0; count = 0; psdS = null; yScale = 0; rows = []; lastRaw = null; gridT = null; t0 = null;
@@ -164,7 +188,35 @@
     if (sensor === 'gyro') return (r && r.alpha != null) ? [r.alpha, r.beta, r.gamma] : null;
     return (a && a.x != null) ? [a.x, a.y, a.z] : null;
   }
+  function updateGate(e) {
+    if (!gateChains) return;
+    const a = (e.acceleration && e.acceleration.x != null) ? e.acceleration : e.accelerationIncludingGravity;
+    if (!a || a.x == null) return;
+    const vals = [a.x, a.y, a.z];
+    let ss = 0;
+    for (let i = 0; i < 3; i++) {
+      let y = vals[i];
+      for (const b of gateChains[i]) y = b.run(y);
+      ss += y * y;
+    }
+    gateEma += (ss - gateEma) / fs;   // about a one-second time constant
+    const rms = Math.sqrt(gateEma);
+    if (!moving && rms > GATE_ON) setMoving(true);
+    else if (moving && rms < GATE_OFF) setMoving(false);
+  }
+  function setMoving(state) {
+    moving = state;
+    ui.gate.className = 'gate ' + (state ? 'moving' : 'still');
+    ui.gateText.textContent = state ? 'Moving. Readings paused, this is not tremor.' : 'Still';
+    ui.readings.classList.toggle('dim', state);
+  }
+  function setGateIdle(text) {
+    ui.gate.className = 'gate';
+    ui.gateText.textContent = text;
+    ui.readings.classList.remove('dim');
+  }
   function onMotion(e) {
+    updateGate(e);
     const v = readSample(e);
     if (!v) {
       missing++;
@@ -214,6 +266,8 @@
     calibrating = false;
     resetBuffers();
     ui.rate.textContent = fs;
+    gateChains = [0, 1, 2].map(() => [biquad('hp', 0.3, fs, 0.7071), biquad('lp', 4, fs, 0.7071)]);
+    gateEma = 0; moving = false; setMoving(false);
     status('Live. Keep still for a few seconds and watch the trace settle.');
     anaTimer = setInterval(analyse, 250);
   }
@@ -271,7 +325,7 @@
     for (let b = 1; b < psdS.length; b++) {
       const f = b * df;
       if (f >= 0.5) totP += psdS[b];
-      if (f >= BAND_LO && f <= BAND_HI) {
+      if (f >= bandLo && f <= bandHi) {
         bandP += psdS[b];
         if (psdS[b] > pv) { pv = psdS[b]; pb = b; }
       }
@@ -289,6 +343,7 @@
       ss += filt[0][j] * filt[0][j] + filt[1][j] * filt[1][j] + filt[2][j] * filt[2][j];
     }
     stats = { peak, rms: Math.sqrt(ss / L), share: totP > 0 ? bandP / totP : 0 };
+    if (moving) return;
     ui.peak.textContent = peak != null ? peak.toFixed(1) : '';
     ui.rms.textContent = stats.rms.toFixed(sensor === 'gyro' ? 2 : 3);
     ui.share.textContent = Math.round(stats.share * 100);
@@ -320,15 +375,20 @@
 
     ctx.lineWidth = 1;
     ctx.strokeStyle = C.grid;
-    for (let s = 0; s <= 5; s++) line(ctx, padL + pw * s / 5, padT, padL + pw * s / 5, padT + ph);
+    const divs = spanSec === 2 ? 4 : 5;
+    for (let s = 0; s <= divs; s++) line(ctx, padL + pw * s / divs, padT, padL + pw * s / divs, padT + ph);
     for (let g = -2; g <= 2; g++) {
       ctx.strokeStyle = g === 0 ? C.rule : C.grid;
       line(ctx, padL, mid - g * ph / 4, padL + pw, mid - g * ph / 4);
     }
     ctx.fillStyle = C.muted; ctx.font = FONT; ctx.textBaseline = 'top'; ctx.textAlign = 'center';
-    for (let s = 0; s <= 5; s++) ctx.fillText(s === 5 ? 'now' : (s - 5) + ' s', padL + pw * s / 5, padT + ph + 6);
+    for (let s = 0; s <= divs; s++) {
+      const secs = spanSec * (s - divs) / divs;
+      const label = s === divs ? 'now' : (Number.isInteger(secs) ? secs : secs.toFixed(1)) + ' s';
+      ctx.fillText(label, padL + pw * s / divs, padT + ph + 6);
+    }
 
-    const span = Math.min(N, Math.round(5 * fs));
+    const span = Math.min(N, Math.round(spanSec * fs));
     const L = Math.min(count, span);
     if (L < 2) { emptyText(ctx, w, h, running ? 'Waiting for motion data' : 'Tap Start'); return; }
 
@@ -370,7 +430,7 @@
     const xOf = f => padL + pw * f / fmax;
 
     ctx.fillStyle = C.band; ctx.globalAlpha = 0.35;
-    ctx.fillRect(xOf(BAND_LO), padT, xOf(BAND_HI) - xOf(BAND_LO), ph);
+    ctx.fillRect(xOf(bandLo), padT, xOf(bandHi) - xOf(bandLo), ph);
     ctx.globalAlpha = 1;
 
     ctx.lineWidth = 1; ctx.strokeStyle = C.grid;
@@ -418,15 +478,37 @@
   }
 
   // ---------- controls ----------
+  function updateCaptions() {
+    ui.traceCap.textContent = 'Filtered ' + bandLo + ' to ' + bandHi + ' Hz, last ' + spanSec + ' s, ' + unit();
+    ui.specCap.textContent = 'Spectrum of the raw signal, last 3 s. Shaded area is ' + bandLo + ' to ' + bandHi + ' Hz.';
+  }
+  function clearReadings() { ui.peak.textContent = ''; ui.rms.textContent = ''; ui.share.textContent = ''; }
+  function setBand(lo, hi) {
+    if (lo === bandLo && hi === bandHi) return;
+    bandLo = lo; bandHi = hi;
+    ui.bandWide.setAttribute('aria-pressed', String(lo === 4));
+    ui.bandMicro.setAttribute('aria-pressed', String(lo === 8));
+    updateCaptions(); clearReadings();
+    if (running && !calibrating) resetBuffers();
+    if (!running) { drawTrace(); drawSpec(); }
+  }
+  function setWindow(sec) {
+    if (sec === spanSec) return;
+    spanSec = sec;
+    ui.win2.setAttribute('aria-pressed', String(sec === 2));
+    ui.win5.setAttribute('aria-pressed', String(sec === 5));
+    updateCaptions();
+    if (!running) drawTrace();
+  }
   function setSensor(s) {
     if (s === sensor) return;
     sensor = s;
     ui.gyro.setAttribute('aria-pressed', String(s === 'gyro'));
     ui.accel.setAttribute('aria-pressed', String(s === 'accel'));
     ui.rmsLabel.textContent = 'band RMS, ' + unit();
-    ui.traceCap.textContent = 'Filtered 4 to 12 Hz, last 5 s, ' + unit();
+    updateCaptions();
     rows = []; ui.csv.disabled = true;
-    ui.peak.textContent = ''; ui.rms.textContent = ''; ui.share.textContent = '';
+    clearReadings();
     if (running && !calibrating) resetBuffers();
     if (!running) { drawTrace(); drawSpec(); }
   }
@@ -455,6 +537,7 @@
     ui.start.textContent = 'Stop'; ui.csv.disabled = true;
     ui.peak.textContent = ''; ui.rms.textContent = ''; ui.share.textContent = ''; ui.rate.textContent = '';
     status('Measuring the sample rate.');
+    gateChains = null; setGateIdle('Checking movement');
     window.addEventListener('devicemotion', onMotion);
     noEventTimer = setTimeout(() => {
       if (!gotEvents) status('No motion data is arriving. Check the page is on HTTPS and motion access is allowed in the browser settings.');
@@ -468,6 +551,7 @@
     window.removeEventListener('devicemotion', onMotion);
     clearInterval(anaTimer); clearTimeout(noEventTimer); cancelAnimationFrame(rafId);
     ui.start.textContent = 'Start';
+    gateChains = null; setGateIdle('');
     ui.csv.disabled = rows.length === 0;
     status(rows.length ? 'Stopped. ' + Math.round(rows.length / fs) + ' s recorded.' : 'Stopped.');
     if (wakeLock) { wakeLock.release().catch(() => {}); wakeLock = null; }
@@ -489,6 +573,10 @@
   ui.gyro.addEventListener('click', () => setSensor('gyro'));
   ui.accel.addEventListener('click', () => setSensor('accel'));
   ui.csv.addEventListener('click', saveCsv);
+  ui.bandWide.addEventListener('click', () => setBand(4, 12));
+  ui.bandMicro.addEventListener('click', () => setBand(8, 12));
+  ui.win2.addEventListener('click', () => setWindow(2));
+  ui.win5.addEventListener('click', () => setWindow(5));
   window.addEventListener('resize', () => { if (!running) { drawTrace(); drawSpec(); } });
   drawTrace(); drawSpec();
 })();
