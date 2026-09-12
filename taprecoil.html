@@ -47,13 +47,15 @@
   .pad.hit { background: var(--ink-2); }
   .pad small { font-weight: 400; font-size: 13px; opacity: 0.8; }
   .pad.idle { background: #B6C1CE; color: var(--ink); }
+  .pad.wait { background: #5E6B7C; }
+  .pad.bad { background: var(--mark); }
   .status { font-size: 14px; color: var(--muted); min-height: 1.4em; }
   .note { font-size: 12px; color: var(--muted); }
 </style>
 </head>
 <body>
 <h1>Tap recoil <span class="ver" id="ver"></span></h1>
-<p class="sub">Hold the phone the way you normally use it, tap Start, then tap the dark pad with your thumb, as you would a button. Twenty or so taps builds a template.</p>
+<p class="sub">Hold the phone the way you normally use it, tap Start, then tap the dark pad with your thumb, as you would a button. One tap at a time with a clear gap between them; the pad goes grey while it is busy. Twenty or so taps builds a template.</p>
 
 <div class="row">
   <button class="primary" id="startBtn">Start</button>
@@ -86,7 +88,8 @@
 
 <script>
 (() => {
-  const VERSION = 1;
+  const VERSION = 2;
+  const MIN_GAP = 0.6;                                // seconds between taps so windows never overlap
   const PRE = 0.1, POST = 0.4, STEP = 0.01;          // window in seconds, 10 ms bins
   const NB = Math.round((PRE + POST) / STEP);         // 50 bins
   const binT = Array.from({ length: NB }, (_, i) => -PRE + i * STEP);
@@ -109,7 +112,7 @@
   let taps = [];                     // completed tap records
   let pending = [];                  // touch-downs waiting for their window to fill
   let meanA = new Float64Array(NB), meanG = new Float64Array(NB);
-  let yA = 0, yG = 0;
+  let yA = 0, yG = 0, lastTapT = -10, rejected = 0;
 
   // ---------- motion capture ----------
   function onMotion(e) {
@@ -127,6 +130,14 @@
     e.preventDefault();
     const touch = e.changedTouches ? e.changedTouches[0] : e;
     const t0 = ((e.timeStamp && e.timeStamp < 1e12) ? e.timeStamp : performance.now()) / 1000;
+    if (t0 - lastTapT < MIN_GAP) {
+      rejected++; lastTapT = t0;
+      for (const p of pending) p.spoiled = true;
+      ui.pad.classList.add('bad'); setTimeout(() => ui.pad.classList.remove('bad'), 250);
+      status('Too soon after the last tap. Leave a clear gap, one tap at a time. (' + rejected + ' ignored)');
+      return;
+    }
+    lastTapT = t0;
     const rect = ui.pad.getBoundingClientRect();
     const rec = {
       t0, x: (touch.clientX - rect.left) / rect.width, y: (touch.clientY - rect.top) / rect.height,
@@ -136,6 +147,8 @@
     pending.push(rec);
     ui.pad.classList.add('hit');
     setTimeout(() => ui.pad.classList.remove('hit'), 90);
+    ui.pad.classList.add('wait'); ui.padText.textContent = 'wait';
+    setTimeout(() => { ui.pad.classList.remove('wait'); if (running) ui.padText.textContent = 'Tap here'; }, MIN_GAP * 1000);
     setTimeout(() => finishTap(rec), (POST + 0.08) * 1000);
   }
   function onTouchEnd(e) {
@@ -153,6 +166,7 @@
   }
   function finishTap(rec) {
     pending = pending.filter(p => p !== rec);
+    if (rec.spoiled) return;
     const s = buf.filter(x => x.t >= rec.t0 - PRE - 0.05 && x.t <= rec.t0 + POST + 0.05);
     if (s.length < 15) { status('Not enough motion samples around that tap. Try again.'); return; }
     const A = [0, 1, 2].map(ax => binT.map(bt => interp(s, 'a', ax, rec.t0 + bt)));
@@ -299,7 +313,7 @@
     if (wakeLock) { wakeLock.release().catch(() => {}); wakeLock = null; }
   }
   function reset() {
-    taps = []; pending = []; meanA.fill(0); meanG.fill(0); yA = 0; yG = 0;
+    taps = []; pending = []; meanA.fill(0); meanG.fill(0); yA = 0; yG = 0; rejected = 0; lastTapT = -10;
     updateReadings(); draw();
     ui.csv.disabled = true; ui.reset.disabled = true; ui.padSub.textContent = '';
     status('Cleared.');
