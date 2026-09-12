@@ -1,0 +1,341 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#EEF1F4">
+<title>Tap recoil</title>
+<style>
+  :root {
+    --paper: #EEF1F4; --panel: #F8FAFC; --grid: #DAE1E8; --rule: #B6C1CE;
+    --ink: #14213D; --ink-2: #2F6B9A; --ink-3: #8DA6BF; --band: #F2C56B; --mark: #C8462B; --muted: #5E6B7C;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body {
+    background: var(--paper); color: var(--ink);
+    font-family: "Avenir Next", "Segoe UI", Roboto, system-ui, -apple-system, sans-serif;
+    font-size: 16px; line-height: 1.4;
+    padding: calc(env(safe-area-inset-top) + 18px) 16px calc(env(safe-area-inset-bottom) + 16px);
+    -webkit-text-size-adjust: 100%; overscroll-behavior: none; touch-action: manipulation;
+    display: flex; flex-direction: column; gap: 14px;
+  }
+  h1 { font-size: 22px; font-weight: 600; letter-spacing: -0.01em; display: flex; align-items: baseline; gap: 10px; }
+  .ver { font-size: 13px; font-weight: 500; color: var(--muted); }
+  .sub { color: var(--muted); font-size: 14px; margin-top: -8px; }
+  .row { display: flex; gap: 10px; align-items: stretch; }
+  button { font: inherit; border: 0; border-radius: 6px; cursor: pointer; -webkit-tap-highlight-color: transparent; touch-action: manipulation; }
+  button:focus-visible { outline: 2px solid var(--ink-2); outline-offset: 2px; }
+  .primary { flex: 1; background: var(--ink); color: #fff; font-size: 17px; font-weight: 600; padding: 14px 18px; }
+  .secondary { background: transparent; color: var(--ink); border: 1.5px solid var(--rule); padding: 12px 14px; font-size: 15px; }
+  .secondary:disabled { opacity: 0.4; cursor: default; }
+  .readings { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+  .reading { border-top: 2px solid var(--ink); padding-top: 6px; }
+  .reading b { display: block; font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; line-height: 1.1; min-height: 1.1em; }
+  .reading small { display: block; color: var(--muted); font-size: 12px; margin-top: 2px; }
+  figure { position: relative; }
+  figure canvas { display: block; width: 100%; background: var(--panel); border: 1.5px solid var(--rule); border-radius: 4px; }
+  figcaption { position: absolute; top: 8px; left: 12px; right: 12px; font-size: 12px; color: var(--muted); pointer-events: none; }
+  #accelPlot, #gyroPlot { height: 22vh; min-height: 140px; }
+  .pad {
+    height: 24vh; min-height: 150px; border-radius: 8px; background: var(--ink); color: #fff;
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px;
+    font-size: 17px; font-weight: 600; user-select: none; -webkit-user-select: none; touch-action: none;
+    transition: background 0.08s;
+  }
+  .pad.hit { background: var(--ink-2); }
+  .pad small { font-weight: 400; font-size: 13px; opacity: 0.8; }
+  .pad.idle { background: #B6C1CE; color: var(--ink); }
+  .status { font-size: 14px; color: var(--muted); min-height: 1.4em; }
+  .note { font-size: 12px; color: var(--muted); }
+</style>
+</head>
+<body>
+<h1>Tap recoil <span class="ver" id="ver"></span></h1>
+<p class="sub">Hold the phone the way you normally use it, tap Start, then tap the dark pad with your thumb, as you would a button. Twenty or so taps builds a template.</p>
+
+<div class="row">
+  <button class="primary" id="startBtn">Start</button>
+  <button class="secondary" id="resetBtn" disabled>Reset</button>
+  <button class="secondary" id="csvBtn" disabled>Save CSV</button>
+</div>
+
+<div class="readings">
+  <div class="reading"><b id="count"></b><small>taps</small></div>
+  <div class="reading"><b id="apeak"></b><small>accel peak, m/s²</small></div>
+  <div class="reading"><b id="gpeak"></b><small>gyro peak, deg/s</small></div>
+  <div class="reading"><b id="ring"></b><small>ring, Hz</small></div>
+  <div class="reading"><b id="settle"></b><small>settle, ms</small></div>
+  <div class="reading"><b id="consist"></b><small>consistency</small></div>
+</div>
+
+<div class="pad idle" id="pad"><span id="padText">Tap Start first</span><small id="padSub"></small></div>
+
+<figure>
+  <canvas id="accelPlot"></canvas>
+  <figcaption>Accelerometer magnitude around touch-down. Faint lines are single taps, bold is the session mean.</figcaption>
+</figure>
+<figure>
+  <canvas id="gyroPlot"></canvas>
+  <figcaption>Gyro magnitude around touch-down.</figcaption>
+</figure>
+
+<p class="status" id="status"></p>
+<p class="note">Each tap captures 100 ms before and 400 ms after touch-down from both sensors, aligned at the touch, with the pre-tap level subtracted. Features per tap: peak accelerometer and gyro response, dominant ring frequency of the gyro, time for the response to settle below 20% of its peak, dwell time and contact size from the touch itself, and correlation of the tap with the running mean. Browsers deliver motion at about 60 samples a second, which is coarse for a response this fast; a native app at 100 to 200 Hz would resolve it much better. Save CSV writes every tap's aligned window in long form.</p>
+
+<script>
+(() => {
+  const VERSION = 1;
+  const PRE = 0.1, POST = 0.4, STEP = 0.01;          // window in seconds, 10 ms bins
+  const NB = Math.round((PRE + POST) / STEP);         // 50 bins
+  const binT = Array.from({ length: NB }, (_, i) => -PRE + i * STEP);
+  const MAX_TAPS = 300;
+
+  const $ = id => document.getElementById(id);
+  const ui = {
+    start: $('startBtn'), reset: $('resetBtn'), csv: $('csvBtn'), pad: $('pad'), padText: $('padText'), padSub: $('padSub'),
+    count: $('count'), apeak: $('apeak'), gpeak: $('gpeak'), ring: $('ring'), settle: $('settle'), consist: $('consist'),
+    status: $('status'), accelPlot: $('accelPlot'), gyroPlot: $('gyroPlot'), ver: $('ver')
+  };
+  const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+  const C = { grid: css('--grid'), rule: css('--rule'), ink: css('--ink'), ink2: css('--ink-2'), ink3: css('--ink-3'), mark: css('--mark'), muted: css('--muted'), band: css('--band') };
+  const FONT = '11px "Avenir Next", "Segoe UI", Roboto, system-ui, sans-serif';
+  const status = m => { ui.status.textContent = m; };
+
+  let running = false, gotEvents = false, noEventTimer = null, wakeLock = null;
+  const buf = [];                    // recent motion samples {t, a:[3], g:[3]}
+  const BUF_SECONDS = 3;
+  let taps = [];                     // completed tap records
+  let pending = [];                  // touch-downs waiting for their window to fill
+  let meanA = new Float64Array(NB), meanG = new Float64Array(NB);
+  let yA = 0, yG = 0;
+
+  // ---------- motion capture ----------
+  function onMotion(e) {
+    const t = ((e.timeStamp && e.timeStamp < 1e12) ? e.timeStamp : performance.now()) / 1000;
+    const r = e.rotationRate, a = e.acceleration;
+    if (!a || a.x == null) return;
+    gotEvents = true;
+    buf.push({ t, a: [a.x, a.y, a.z], g: (r && r.alpha != null) ? [r.alpha, r.beta, r.gamma] : [0, 0, 0] });
+    while (buf.length && buf[0].t < t - BUF_SECONDS) buf.shift();
+  }
+
+  // ---------- tap capture ----------
+  function onTouchStart(e) {
+    if (!running) { status('Tap Start first.'); return; }
+    e.preventDefault();
+    const touch = e.changedTouches ? e.changedTouches[0] : e;
+    const t0 = ((e.timeStamp && e.timeStamp < 1e12) ? e.timeStamp : performance.now()) / 1000;
+    const rect = ui.pad.getBoundingClientRect();
+    const rec = {
+      t0, x: (touch.clientX - rect.left) / rect.width, y: (touch.clientY - rect.top) / rect.height,
+      radius: touch.radiusX != null ? Math.max(touch.radiusX, touch.radiusY || 0) : null,
+      force: touch.force != null ? touch.force : null, tUp: null
+    };
+    pending.push(rec);
+    ui.pad.classList.add('hit');
+    setTimeout(() => ui.pad.classList.remove('hit'), 90);
+    setTimeout(() => finishTap(rec), (POST + 0.08) * 1000);
+  }
+  function onTouchEnd(e) {
+    const t = ((e.timeStamp && e.timeStamp < 1e12) ? e.timeStamp : performance.now()) / 1000;
+    for (const p of pending) if (p.tUp === null) { p.tUp = t; break; }
+  }
+  function interp(samples, key, axis, tq) {
+    // linear interpolation of one channel at time tq
+    let lo = 0, hi = samples.length - 1;
+    if (tq <= samples[0].t) return samples[0][key][axis];
+    if (tq >= samples[hi].t) return samples[hi][key][axis];
+    while (hi - lo > 1) { const mid = (lo + hi) >> 1; if (samples[mid].t <= tq) lo = mid; else hi = mid; }
+    const p = samples[lo], q = samples[hi], w = (tq - p.t) / (q.t - p.t || 1e-9);
+    return p[key][axis] + w * (q[key][axis] - p[key][axis]);
+  }
+  function finishTap(rec) {
+    pending = pending.filter(p => p !== rec);
+    const s = buf.filter(x => x.t >= rec.t0 - PRE - 0.05 && x.t <= rec.t0 + POST + 0.05);
+    if (s.length < 15) { status('Not enough motion samples around that tap. Try again.'); return; }
+    const A = [0, 1, 2].map(ax => binT.map(bt => interp(s, 'a', ax, rec.t0 + bt)));
+    const G = [0, 1, 2].map(ax => binT.map(bt => interp(s, 'g', ax, rec.t0 + bt)));
+    const preN = Math.round(PRE / STEP) - 1;
+    for (const ch of [A, G]) for (const ax of ch) {
+      let m = 0; for (let i = 0; i < preN; i++) m += ax[i]; m /= preN;
+      for (let i = 0; i < NB; i++) ax[i] -= m;
+    }
+    const magA = binT.map((_, i) => Math.hypot(A[0][i], A[1][i], A[2][i]));
+    const magG = binT.map((_, i) => Math.hypot(G[0][i], G[1][i], G[2][i]));
+    const i0 = Math.round(PRE / STEP);
+    // features
+    let apk = 0, apkI = i0, gpk = 0;
+    for (let i = i0; i < NB; i++) { if (magA[i] > apk) { apk = magA[i]; apkI = i; } if (magG[i] > gpk) gpk = magG[i]; }
+    let settleI = apkI;
+    for (let i = NB - 1; i >= apkI; i--) if (magA[i] > 0.2 * apk) { settleI = i; break; }
+    const settleMs = (settleI - i0) * STEP * 1000;
+    // ring frequency: zero crossings of the dominant gyro axis over 0 to 250 ms after touch-down
+    let dom = 0, domVar = -1;
+    for (let ax = 0; ax < 3; ax++) { let v = 0; for (let i = i0; i < NB; i++) v += G[ax][i] * G[ax][i]; if (v > domVar) { domVar = v; dom = ax; } }
+    const iEnd = i0 + Math.round(0.25 / STEP);
+    let zc = 0;
+    for (let i = i0 + 1; i < iEnd; i++) if ((G[dom][i] >= 0) !== (G[dom][i - 1] >= 0)) zc++;
+    const ringHz = zc / 2 / 0.25;
+    // consistency against the mean of previous taps
+    let consist = null;
+    if (taps.length >= 3) consist = corr(magA.slice(i0), Array.from(meanA).slice(i0));
+    const tap = {
+      t0: rec.t0, x: rec.x, y: rec.y, radius: rec.radius, force: rec.force,
+      dwellMs: rec.tUp !== null ? (rec.tUp - rec.t0) * 1000 : null,
+      A, G, magA, magG, apk, gpk, settleMs, ringHz, consist
+    };
+    taps.push(tap);
+    if (taps.length > MAX_TAPS) taps.shift();
+    const n = taps.length;
+    for (let i = 0; i < NB; i++) { meanA[i] += (magA[i] - meanA[i]) / n; meanG[i] += (magG[i] - meanG[i]) / n; }
+    updateReadings();
+    draw();
+    ui.csv.disabled = false; ui.reset.disabled = false;
+    ui.padSub.textContent = n + (n === 1 ? ' tap' : ' taps') + (tap.dwellMs != null ? ', dwell ' + Math.round(tap.dwellMs) + ' ms' : '');
+  }
+  function corr(a, b) {
+    const n = a.length; let ma = 0, mb = 0;
+    for (let i = 0; i < n; i++) { ma += a[i]; mb += b[i]; }
+    ma /= n; mb /= n;
+    let sab = 0, saa = 0, sbb = 0;
+    for (let i = 0; i < n; i++) { const da = a[i] - ma, db = b[i] - mb; sab += da * db; saa += da * da; sbb += db * db; }
+    return saa > 0 && sbb > 0 ? sab / Math.sqrt(saa * sbb) : 0;
+  }
+  function meanSd(arr) {
+    const v = arr.filter(x => x != null && isFinite(x));
+    if (!v.length) return [NaN, NaN];
+    const m = v.reduce((s, x) => s + x, 0) / v.length;
+    const sd = Math.sqrt(v.reduce((s, x) => s + (x - m) * (x - m), 0) / Math.max(1, v.length - 1));
+    return [m, sd];
+  }
+  function updateReadings() {
+    const n = taps.length;
+    ui.count.textContent = n;
+    const [am, asd] = meanSd(taps.map(t => t.apk));
+    const [gm] = meanSd(taps.map(t => t.gpk));
+    const [rm] = meanSd(taps.map(t => t.ringHz));
+    const [sm] = meanSd(taps.map(t => t.settleMs));
+    const [cm] = meanSd(taps.slice(-10).map(t => t.consist));
+    ui.apeak.textContent = n ? am.toFixed(2) + (n > 1 ? ' ±' + asd.toFixed(2) : '') : '';
+    ui.gpeak.textContent = n ? gm.toFixed(1) : '';
+    ui.ring.textContent = n ? rm.toFixed(1) : '';
+    ui.settle.textContent = n ? Math.round(sm) : '';
+    ui.consist.textContent = isFinite(cm) ? cm.toFixed(2) : '';
+  }
+
+  // ---------- drawing ----------
+  function fitCanvas(c) {
+    const dpr = window.devicePixelRatio || 1, w = c.clientWidth, h = c.clientHeight;
+    const W = Math.round(w * dpr), H = Math.round(h * dpr);
+    if (c.width !== W || c.height !== H) { c.width = W; c.height = H; }
+    const ctx = c.getContext('2d'); ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.clearRect(0, 0, w, h);
+    return [ctx, w, h];
+  }
+  function line(ctx, x1, y1, x2, y2) { ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke(); }
+  function drawPlot(canvas, key, mean, scaleRef, unit, fmt) {
+    const [ctx, w, h] = fitCanvas(canvas);
+    const padL = 46, padR = 12, padT = 30, padB = 22;
+    const pw = w - padL - padR, ph = h - padT - padB;
+    const xOf = t => padL + pw * (t + PRE) / (PRE + POST);
+    ctx.lineWidth = 1; ctx.strokeStyle = C.grid; ctx.fillStyle = C.muted; ctx.font = FONT; ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+    for (let ms = -100; ms <= 400; ms += 100) { line(ctx, xOf(ms / 1000), padT, xOf(ms / 1000), padT + ph); ctx.fillText(ms === 0 ? 'touch' : ms + ' ms', xOf(ms / 1000), padT + ph + 6); }
+    ctx.strokeStyle = C.mark; ctx.setLineDash([4, 4]); line(ctx, xOf(0), padT, xOf(0), padT + ph); ctx.setLineDash([]);
+    ctx.strokeStyle = C.rule; line(ctx, padL, padT + ph, padL + pw, padT + ph);
+    if (!taps.length) { ctx.fillStyle = C.muted; ctx.font = '14px "Avenir Next", "Segoe UI", Roboto, system-ui, sans-serif'; ctx.textBaseline = 'middle'; ctx.fillText(running ? 'Tap the pad' : 'Tap Start', w / 2, h / 2); return scaleRef; }
+    let m = 0;
+    for (const t of taps.slice(-30)) for (const v of t[key]) if (v > m) m = v;
+    scaleRef = Math.max(scaleRef * 0.97, m * 1.05, 1e-6);
+    const yOf = v => padT + ph * (1 - Math.min(1, v / scaleRef));
+    ctx.textAlign = 'right'; ctx.textBaseline = 'middle'; ctx.fillStyle = C.muted;
+    ctx.fillText(fmt(scaleRef), padL - 6, padT); ctx.fillText('0', padL - 6, padT + ph);
+    ctx.textAlign = 'left'; ctx.textBaseline = 'top'; ctx.fillText(unit, 6, padT + ph + 6);
+    ctx.lineJoin = 'round';
+    ctx.strokeStyle = C.ink3; ctx.globalAlpha = 0.35; ctx.lineWidth = 1;
+    for (const t of taps.slice(-30)) {
+      ctx.beginPath();
+      t[key].forEach((v, i) => { const x = xOf(binT[i]), y = yOf(v); if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y); });
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1; ctx.strokeStyle = C.ink; ctx.lineWidth = 2;
+    ctx.beginPath();
+    for (let i = 0; i < NB; i++) { const x = xOf(binT[i]), y = yOf(mean[i]); if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y); }
+    ctx.stroke();
+    return scaleRef;
+  }
+  function draw() {
+    yA = drawPlot(ui.accelPlot, 'magA', meanA, yA, 'm/s²', v => v.toFixed(2));
+    yG = drawPlot(ui.gyroPlot, 'magG', meanG, yG, 'deg/s', v => v.toFixed(0));
+  }
+
+  // ---------- controls ----------
+  async function start() {
+    if (running) { stop(); return; }
+    if (typeof DeviceMotionEvent === 'undefined') { status('This browser does not expose motion sensors.'); return; }
+    if (typeof DeviceMotionEvent.requestPermission === 'function') {
+      try {
+        const r = await DeviceMotionEvent.requestPermission();
+        if (r !== 'granted') { status('Motion access was refused. Reload the page and allow it.'); return; }
+      } catch (err) { status('Motion access could not be requested. Open the page over HTTPS and try again.'); return; }
+    }
+    if (!window.isSecureContext) { status('This page is not on HTTPS, so the browser will not deliver sensor data.'); return; }
+    running = true; gotEvents = false; buf.length = 0;
+    window.addEventListener('devicemotion', onMotion);
+    ui.start.textContent = 'Stop';
+    ui.pad.classList.remove('idle'); ui.padText.textContent = 'Tap here';
+    status('Live. Tap the pad with your thumb, one clean tap at a time.');
+    noEventTimer = setTimeout(() => { if (!gotEvents) status('No motion data is arriving. Check HTTPS and motion access.'); }, 3000);
+    try { if (navigator.wakeLock) wakeLock = await navigator.wakeLock.request('screen'); } catch (err) {}
+    draw();
+  }
+  function stop() {
+    running = false;
+    window.removeEventListener('devicemotion', onMotion);
+    clearTimeout(noEventTimer);
+    ui.start.textContent = 'Start';
+    ui.pad.classList.add('idle'); ui.padText.textContent = 'Stopped';
+    status('Stopped. ' + taps.length + ' taps recorded.');
+    if (wakeLock) { wakeLock.release().catch(() => {}); wakeLock = null; }
+  }
+  function reset() {
+    taps = []; pending = []; meanA.fill(0); meanG.fill(0); yA = 0; yG = 0;
+    updateReadings(); draw();
+    ui.csv.disabled = true; ui.reset.disabled = true; ui.padSub.textContent = '';
+    status('Cleared.');
+  }
+  function saveCsv() {
+    if (!taps.length) return;
+    const rows = ['tap,t0_s,bin_ms,ax,ay,az,gx,gy,gz,mag_a,mag_g,x_frac,y_frac,radius,force,dwell_ms,apk,gpk,settle_ms,ring_hz,consist'];
+    taps.forEach((t, k) => {
+      for (let i = 0; i < NB; i++) {
+        rows.push([k + 1, t.t0.toFixed(3), Math.round(binT[i] * 1000),
+          t.A[0][i].toFixed(4), t.A[1][i].toFixed(4), t.A[2][i].toFixed(4),
+          t.G[0][i].toFixed(4), t.G[1][i].toFixed(4), t.G[2][i].toFixed(4),
+          t.magA[i].toFixed(4), t.magG[i].toFixed(4),
+          t.x.toFixed(3), t.y.toFixed(3), t.radius != null ? t.radius.toFixed(2) : '', t.force != null ? t.force.toFixed(3) : '',
+          t.dwellMs != null ? Math.round(t.dwellMs) : '', t.apk.toFixed(4), t.gpk.toFixed(4), Math.round(t.settleMs), t.ringHz.toFixed(2),
+          t.consist != null ? t.consist.toFixed(3) : ''].join(','));
+      }
+    });
+    const blob = new Blob([rows.join('\n')], { type: 'text/csv' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob); a.download = 'taprecoil_v' + VERSION + '_' + taps.length + 'taps.csv';
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+  }
+
+  ui.start.addEventListener('click', start);
+  ui.reset.addEventListener('click', reset);
+  ui.csv.addEventListener('click', saveCsv);
+  ui.pad.addEventListener('touchstart', onTouchStart, { passive: false });
+  ui.pad.addEventListener('touchend', onTouchEnd, { passive: true });
+  ui.pad.addEventListener('mousedown', e => { if (!('ontouchstart' in window)) onTouchStart(e); });
+  ui.pad.addEventListener('mouseup', e => { if (!('ontouchstart' in window)) onTouchEnd(e); });
+  window.addEventListener('resize', draw);
+  ui.ver.textContent = 'v' + VERSION;
+  draw();
+})();
+</script>
+</body>
+</html>
