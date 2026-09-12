@@ -67,9 +67,12 @@
   <div class="reading"><b id="count"></b><small>taps</small></div>
   <div class="reading"><b id="apeak"></b><small>accel peak, m/s²</small></div>
   <div class="reading"><b id="gpeak"></b><small>gyro peak, deg/s</small></div>
-  <div class="reading"><b id="ring"></b><small>ring, Hz</small></div>
+  <div class="reading"><b id="ring"></b><small>rock, Hz</small></div>
   <div class="reading"><b id="settle"></b><small>settle, ms</small></div>
   <div class="reading"><b id="consist"></b><small>consistency</small></div>
+  <div class="reading"><b id="rpp"></b><small>rotation per push</small></div>
+  <div class="reading"><b id="gax"></b><small>gyro axis share, %</small></div>
+  <div class="reading"><b id="aax"></b><small>accel axis share, %</small></div>
 </div>
 
 <div class="pad idle" id="pad"><span id="padText">Tap Start first</span><small id="padSub"></small></div>
@@ -84,11 +87,11 @@
 </figure>
 
 <p class="status" id="status"></p>
-<p class="note">Each tap captures 100 ms before and 400 ms after touch-down from both sensors, aligned at the touch, with the pre-tap level subtracted. Features per tap: peak accelerometer and gyro response, dominant ring frequency of the gyro, time for the response to settle below 20% of its peak, dwell time and contact size from the touch itself, and correlation of the tap with the running mean. Browsers deliver motion at about 60 samples a second, which is coarse for a response this fast; a native app at 100 to 200 Hz would resolve it much better. Save CSV writes every tap's aligned window in long form.</p>
+<p class="note">Each tap captures 100 ms before and 400 ms after touch-down from both sensors, aligned at the touch, with the pre-tap level subtracted. Features per tap: peak accelerometer and gyro response, rotation per unit push (gyro peak over accelerometer peak, which barely depends on how hard you tap), the rocking frequency of the phone in the hand, time for the response to settle below 20% of its peak, which axes carry the response (a grip signature), dwell time and contact size from the touch itself, and correlation of the tap with the running mean. Browsers deliver motion at about 60 samples a second, which is coarse for a response this fast; a native app at 100 to 200 Hz would resolve it much better. Save CSV writes every tap's aligned window in long form.</p>
 
 <script>
 (() => {
-  const VERSION = 2;
+  const VERSION = 3;
   const MIN_GAP = 0.6;                                // seconds between taps so windows never overlap
   const PRE = 0.1, POST = 0.4, STEP = 0.01;          // window in seconds, 10 ms bins
   const NB = Math.round((PRE + POST) / STEP);         // 50 bins
@@ -98,7 +101,7 @@
   const $ = id => document.getElementById(id);
   const ui = {
     start: $('startBtn'), reset: $('resetBtn'), csv: $('csvBtn'), pad: $('pad'), padText: $('padText'), padSub: $('padSub'),
-    count: $('count'), apeak: $('apeak'), gpeak: $('gpeak'), ring: $('ring'), settle: $('settle'), consist: $('consist'),
+    count: $('count'), apeak: $('apeak'), gpeak: $('gpeak'), ring: $('ring'), settle: $('settle'), consist: $('consist'), rpp: $('rpp'), gax: $('gax'), aax: $('aax'),
     status: $('status'), accelPlot: $('accelPlot'), gyroPlot: $('gyroPlot'), ver: $('ver')
   };
   const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
@@ -147,7 +150,8 @@
     pending.push(rec);
     ui.pad.classList.add('hit');
     setTimeout(() => ui.pad.classList.remove('hit'), 90);
-    ui.pad.classList.add('wait'); ui.padText.textContent = 'wait';
+    ui.pad.classList.add('wait');
+    setTimeout(() => { if (running) ui.padText.textContent = 'wait'; }, 200);
     setTimeout(() => { ui.pad.classList.remove('wait'); if (running) ui.padText.textContent = 'Tap here'; }, MIN_GAP * 1000);
     setTimeout(() => finishTap(rec), (POST + 0.08) * 1000);
   }
@@ -192,13 +196,17 @@
     let zc = 0;
     for (let i = i0 + 1; i < iEnd; i++) if ((G[dom][i] >= 0) !== (G[dom][i - 1] >= 0)) zc++;
     const ringHz = zc / 2 / 0.25;
+    // which axes carry the response in the first 150 ms (grip signature)
+    const iE = i0 + Math.round(0.15 / STEP);
+    const share = ch => { const e = ch.map(ax => { let v = 0; for (let i = i0; i < iE; i++) v += ax[i] * ax[i]; return v; }); const tot = e[0] + e[1] + e[2] || 1; return e.map(v => v / tot); };
+    const aShare = share(A), gShare = share(G);
     // consistency against the mean of previous taps
     let consist = null;
     if (taps.length >= 3) consist = corr(magA.slice(i0), Array.from(meanA).slice(i0));
     const tap = {
       t0: rec.t0, x: rec.x, y: rec.y, radius: rec.radius, force: rec.force,
       dwellMs: rec.tUp !== null ? (rec.tUp - rec.t0) * 1000 : null,
-      A, G, magA, magG, apk, gpk, settleMs, ringHz, consist
+      A, G, magA, magG, apk, gpk, settleMs, ringHz, consist, aShare, gShare
     };
     taps.push(tap);
     if (taps.length > MAX_TAPS) taps.shift();
@@ -237,6 +245,11 @@
     ui.ring.textContent = n ? rm.toFixed(1) : '';
     ui.settle.textContent = n ? Math.round(sm) : '';
     ui.consist.textContent = isFinite(cm) ? cm.toFixed(2) : '';
+    const [rp] = meanSd(taps.map(t => t.apk > 0.05 ? t.gpk / t.apk : null));
+    ui.rpp.textContent = isFinite(rp) ? rp.toFixed(0) : '';
+    const avg = key => [0, 1, 2].map(i => Math.round(100 * taps.reduce((s, t) => s + t[key][i], 0) / n));
+    ui.gax.textContent = n ? avg('gShare').join('/') : '';
+    ui.aax.textContent = n ? avg('aShare').join('/') : '';
   }
 
   // ---------- drawing ----------
@@ -320,7 +333,7 @@
   }
   function saveCsv() {
     if (!taps.length) return;
-    const rows = ['tap,t0_s,bin_ms,ax,ay,az,gx,gy,gz,mag_a,mag_g,x_frac,y_frac,radius,force,dwell_ms,apk,gpk,settle_ms,ring_hz,consist'];
+    const rows = ['tap,t0_s,bin_ms,ax,ay,az,gx,gy,gz,mag_a,mag_g,x_frac,y_frac,radius,force,dwell_ms,apk,gpk,settle_ms,rock_hz,consist,a_share_x,a_share_y,a_share_z,g_share_x,g_share_y,g_share_z'];
     taps.forEach((t, k) => {
       for (let i = 0; i < NB; i++) {
         rows.push([k + 1, t.t0.toFixed(3), Math.round(binT[i] * 1000),
@@ -329,7 +342,7 @@
           t.magA[i].toFixed(4), t.magG[i].toFixed(4),
           t.x.toFixed(3), t.y.toFixed(3), t.radius != null ? t.radius.toFixed(2) : '', t.force != null ? t.force.toFixed(3) : '',
           t.dwellMs != null ? Math.round(t.dwellMs) : '', t.apk.toFixed(4), t.gpk.toFixed(4), Math.round(t.settleMs), t.ringHz.toFixed(2),
-          t.consist != null ? t.consist.toFixed(3) : ''].join(','));
+          t.consist != null ? t.consist.toFixed(3) : '', ...t.aShare.map(v => v.toFixed(3)), ...t.gShare.map(v => v.toFixed(3))].join(','));
       }
     });
     const blob = new Blob([rows.join('\n')], { type: 'text/csv' });
@@ -344,6 +357,7 @@
   ui.csv.addEventListener('click', saveCsv);
   ui.pad.addEventListener('touchstart', onTouchStart, { passive: false });
   ui.pad.addEventListener('touchend', onTouchEnd, { passive: true });
+  ui.pad.addEventListener('touchcancel', onTouchEnd, { passive: true });
   ui.pad.addEventListener('mousedown', e => { if (!('ontouchstart' in window)) onTouchStart(e); });
   ui.pad.addEventListener('mouseup', e => { if (!('ontouchstart' in window)) onTouchEnd(e); });
   window.addEventListener('resize', draw);
