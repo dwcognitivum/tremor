@@ -133,7 +133,7 @@
 
 <script>
 (() => {
-  const VERSION = 8;   // bump this on every change to the page
+  const VERSION = 9;   // bump this on every change to the page
   let bandLo = 4, bandHi = 12, spanSec = 5;
   const N = 1024;          // ring buffer length in samples
   const MAX_ROWS = 40000;  // CSV cap
@@ -164,7 +164,7 @@
   let rafId = null, anaTimer = null, noEventTimer = null, wakeLock = null, lastDraw = 0;
 
   // Movement gate: 0.3 to 4 Hz accelerometer power, with hysteresis
-  const GATE_ON = 0.25, GATE_OFF = 0.15;   // m/s² RMS
+  const GATE_ON = 0.25, GATE_OFF = 0.2;    // m/s² RMS
   let gateChains = null, gateEma = 0, moving = false, gateLive = true, lastEventT = 0;
 
   // Gait subtraction: per-step templates (two, one per foot) learned from the raw signal
@@ -338,7 +338,7 @@
       for (const b of gateChains[i]) y = b.run(y);
       ss += y * y;
     }
-    gateEma += (ss - gateEma) / fs;   // about a one-second time constant
+    gateEma += (ss - gateEma) / (0.5 * fs);   // about a half-second time constant
     const rms = Math.sqrt(gateEma);
     let changed = false;
     if (!moving && rms > GATE_ON) { moving = true; changed = true; }
