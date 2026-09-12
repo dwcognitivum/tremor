@@ -49,11 +49,12 @@
   .reading { border-top: 2px solid var(--ink); padding-top: 6px; }
   .reading b { display: block; font-size: 24px; font-weight: 600; font-variant-numeric: tabular-nums; line-height: 1.1; min-height: 1.1em; }
   .reading small { display: block; color: var(--muted); font-size: 12px; margin-top: 2px; }
-  .gate { display: flex; align-items: center; gap: 8px; font-size: 14px; color: var(--muted); min-height: 1.4em; }
-  .gate .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--rule); flex: none; }
-  .gate.still .dot { background: var(--ink-2); }
-  .gate.moving { color: var(--mark); }
-  .gate.moving .dot { background: var(--mark); }
+  .gate { display: flex; align-items: center; gap: 10px; font-size: 15px; font-weight: 600; min-height: 44px; padding: 10px 14px; border-radius: 6px; background: #E3E8EE; color: var(--muted); transition: background 0.2s, color 0.2s; }
+  .gate .dot { width: 12px; height: 12px; border-radius: 50%; background: var(--rule); flex: none; }
+  .gate.still { background: #2E8B57; color: #fff; }
+  .gate.still .dot { background: #fff; }
+  .gate.moving { background: #D0342C; color: #fff; }
+  .gate.moving .dot { background: #fff; }
   .readings { transition: opacity 0.2s; }
   .readings.dim { opacity: 0.35; }
   figure { position: relative; }
