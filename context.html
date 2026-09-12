@@ -82,7 +82,7 @@
 
 <script>
 (() => {
-  const VERSION = 4;
+  const VERSION = 5;
   const IOS = /iP(hone|ad|od)/.test(navigator.userAgent);   // iOS reports gravity with the opposite sign to the spec
   // thresholds (first guesses; tune from logged data)
   const SURFACE_LF = 0.04, SURFACE_TREMOR = 0.2;   // on a surface: almost no movement and no tremor on the gyro
@@ -102,8 +102,9 @@
     ['walk_swing', 'Walking, arm swinging', '#A02A24'],
     ['vehicle', 'Vehicle', '#6A4C93'],
   ];
-  const COLOR = Object.fromEntries(CONTEXTS.map(c => [c[0], c[2]]));
-  const NAME = Object.fromEntries(CONTEXTS.map(c => [c[0], c[1]]));
+  const LABEL_ONLY = [['seated', 'Seated (label only)', '#2E8B57'], ['standing', 'Standing (label only)', '#3AA76D']];
+  const COLOR = Object.fromEntries([...CONTEXTS, ...LABEL_ONLY].map(c => [c[0], c[2]]));
+  const NAME = Object.fromEntries([...CONTEXTS, ...LABEL_ONLY].map(c => [c[0], c[1]]));
 
   const $ = id => document.getElementById(id);
   const ui = { start: $('startBtn'), csv: $('csvBtn'), banner: $('banner'), ctx: $('ctx'), ctxSub: $('ctxSub'),
@@ -277,7 +278,7 @@
   }
 
   // ---------- controls ----------
-  for (const [id, name] of CONTEXTS) {
+  for (const [id, name] of [...CONTEXTS, ...LABEL_ONLY]) {
     const b = document.createElement('button'); b.textContent = name; b.setAttribute('aria-pressed', 'false');
     b.addEventListener('click', () => {
       label = label === id ? '' : id;
