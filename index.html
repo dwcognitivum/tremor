@@ -58,7 +58,8 @@
   .gate.moving .dot { background: #fff; }
   .gate.walking { background: #C9821A; color: #fff; }
   .gate.walking .dot { background: #fff; }
-  .toggle { flex: 1; }
+  .toggle { flex: 1; font-size: 14px; padding: 12px 8px; }
+  #strip { height: 14vh; min-height: 90px; }
   .toggle[aria-pressed="true"] { background: var(--ink); color: #fff; border-color: var(--ink); }
   .readings { transition: opacity 0.2s; }
   .readings.dim { opacity: 0.35; }
@@ -95,6 +96,7 @@
 </div>
 <div class="row">
   <button class="secondary toggle" id="gaitBtn" aria-pressed="false">Gait subtraction off</button>
+  <button class="secondary toggle" id="impBtn" aria-pressed="false">Impulse rejection off</button>
 </div>
 
 <div class="readings">
@@ -114,6 +116,10 @@
     <span class="sw" style="background:var(--ink-3)"></span>
   </figcaption>
 </figure>
+<figure id="stripFig" style="display:none">
+  <canvas id="strip"></canvas>
+  <figcaption id="stripCap">Band envelope, last 10 s. Tinted spans are rejected as impulses.</figcaption>
+</figure>
 <figure>
   <canvas id="spec"></canvas>
   <figcaption id="specCap">Spectrum of the raw signal, last 3 s. Shaded area is 4 to 12 Hz.</figcaption>
@@ -123,11 +129,11 @@
 <div class="row">
   <button class="secondary" id="csvBtn" disabled>Save CSV</button>
 </div>
-<p class="note">Browsers deliver motion at about 60 samples a second on both iPhone and Android, which is enough to resolve 12 Hz. The page needs HTTPS. On iPhone, Safari asks for motion access when you tap Start. Save CSV keeps about the first ten minutes of the raw, evenly resampled signal, before any gait subtraction. Gait subtraction learns the repeating waveform of each step from the accelerometer's rhythm and removes it before filtering; it needs a steady walk of about ten steps to lock on.</p>
+<p class="note">Browsers deliver motion at about 60 samples a second on both iPhone and Android, which is enough to resolve 12 Hz. The page needs HTTPS. On iPhone, Safari asks for motion access when you tap Start. Save CSV keeps about the first ten minutes of the raw, evenly resampled signal, before any gait subtraction. Gait subtraction learns the repeating waveform of each step from the accelerometer's rhythm and removes it before filtering; it needs a steady walk of about ten steps to lock on. Impulse rejection drops the moments where the band envelope spikes above twice its quiet floor, so footfalls are left out of the readings without needing to detect steps.</p>
 
 <script>
 (() => {
-  const VERSION = 6;   // bump this on every change to the page
+  const VERSION = 7;   // bump this on every change to the page
   let bandLo = 4, bandHi = 12, spanSec = 5;
   const N = 1024;          // ring buffer length in samples
   const MAX_ROWS = 40000;  // CSV cap
@@ -138,7 +144,8 @@
     peak: $('peak'), rms: $('rms'), share: $('share'), rate: $('rate'), rmsLabel: $('rmsLabel'),
     status: $('status'), csv: $('csvBtn'), trace: $('trace'), spec: $('spec'), traceCap: $('traceCap'), specCap: $('specCap'),
     bandWide: $('bandWide'), bandMicro: $('bandMicro'), win2: $('win2'), win5: $('win5'),
-    readings: document.querySelector('.readings'), gate: $('gate'), gateText: $('gateText'), ver: $('ver'), gaitBtn: $('gaitBtn')
+    readings: document.querySelector('.readings'), gate: $('gate'), gateText: $('gateText'), ver: $('ver'), gaitBtn: $('gaitBtn'),
+    impBtn: $('impBtn'), strip: $('strip'), stripFig: $('stripFig'), stripCap: $('stripCap')
   };
   const css = name => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
   const C = {
@@ -163,6 +170,48 @@
   // Gait subtraction: per-step templates (two, one per foot) learned from the raw signal
   const BINS = 64;
   let gaitOn = false, stepChain = null;
+
+  // Impulse rejection: gate out moments where the band envelope spikes above its quiet floor
+  const IMP_K = 2.0;        // threshold as a multiple of the 25th-percentile envelope
+  const IMP_CORR = 1.3;     // scales the RMS of the kept samples back to a full-signal RMS (calibrated on a Gaussian tremor)
+  let impOn = false, stripScale = 0;
+  const imp = { env: new Float32Array(N), span: 0, thr: 0, kept: 1 };
+  function computeImpulseGate(L, base) {
+    const span = Math.min(count, Math.round(10 * fs), N);
+    const sbase = (head - span + N) % N;
+    const W = Math.max(2, Math.round(0.1 * fs));
+    const win = new Float32Array(W);
+    let sum = 0, wi = 0;
+    for (let k = 0; k < span; k++) {
+      const j = (sbase + k) % N;
+      const pk = filt[0][j] * filt[0][j] + filt[1][j] * filt[1][j] + filt[2][j] * filt[2][j];
+      sum += pk - win[wi]; win[wi] = pk; wi = (wi + 1) % W;
+      imp.env[k] = Math.sqrt(Math.max(0, sum) / Math.min(W, k + 1));
+    }
+    imp.span = span;
+    const sorted = Float32Array.from(imp.env.subarray(0, span)).sort();
+    imp.thr = IMP_K * sorted[Math.floor(0.25 * (span - 1))];
+    const off = span - L;
+    const w = new Float32Array(L);
+    let nAcc = 0, ssAcc = 0, ssAll = 0;
+    for (let k = 0; k < L; k++) {
+      const j = (base + k) % N;
+      const pk = filt[0][j] * filt[0][j] + filt[1][j] * filt[1][j] + filt[2][j] * filt[2][j];
+      ssAll += pk;
+      if (imp.env[off + k] <= imp.thr) { w[k] = 1; nAcc++; ssAcc += pk; }
+    }
+    imp.kept = nAcc / L;
+    let rms;
+    if (nAcc < 0.2 * L) { w.fill(1); rms = Math.sqrt(ssAll / L); }
+    else rms = Math.sqrt(ssAcc / nAcc) * IMP_CORR;
+    const ws = new Float32Array(L), half = Math.floor(W / 2);
+    for (let k = 0; k < L; k++) {
+      let acc = 0, n = 0;
+      for (let m = k - half; m <= k + half; m++) if (m >= 0 && m < L) { acc += w[m]; n++; }
+      ws[k] = acc / n;
+    }
+    return { w: ws, rms };
+  }
   const step = { p1: 0, p2: 0, t1: 0, t2: 0, lastT: -10, peakEma: 0 };
   const gait = {
     lastStepT: null, seg: [], count: [0, 0], next: 0, pred: 0, expDur: 0, irregular: 0,
@@ -294,18 +343,27 @@
     let changed = false;
     if (!moving && rms > GATE_ON) { moving = true; changed = true; }
     else if (moving && rms < GATE_OFF) { moving = false; changed = true; }
-    if (gaitOn) detectStep(Math.sqrt(vals[0] * vals[0] + vals[1] * vals[1] + vals[2] * vals[2]), t);
+    if (gaitOn || impOn) detectStep(Math.sqrt(vals[0] * vals[0] + vals[1] * vals[1] + vals[2] * vals[2]), t);
     if (changed) refreshGate();
   }
   function refreshGate() {
     if (!gateChains) return;
-    const walking = gaitOn && gaitRecent();
-    const mature = walking && gaitMature();
+    const walking = (gaitOn || impOn) && gaitRecent();
+    const mature = walking && (!gaitOn || gaitMature());
+    const live = walking && (mature || impOn);
     let cls, text;
-    if (moving && walking) { cls = 'walking'; text = mature ? 'Walking. Gait subtracted, readings live.' : 'Walking. Learning your stride.'; }
-    else if (moving) { cls = 'moving'; text = gaitOn ? 'Moving, no steady steps. Readings paused.' : 'Moving. Readings paused, this is not tremor.'; }
+    if (moving && walking) {
+      cls = 'walking';
+      if (live) {
+        const parts = [];
+        if (gaitOn && gaitMature()) parts.push('gait subtracted');
+        if (impOn) parts.push('impulses rejected');
+        text = 'Walking. ' + parts.join(', ').replace(/^./, c => c.toUpperCase()) + ', readings live.';
+      } else text = 'Walking. Learning your stride.';
+    }
+    else if (moving) { cls = 'moving'; text = (gaitOn || impOn) ? 'Moving, no steady steps. Readings paused.' : 'Moving. Readings paused, this is not tremor.'; }
     else { cls = 'still'; text = 'Still'; }
-    gateLive = !moving || mature;
+    gateLive = !moving || live;
     ui.gate.className = 'gate ' + cls;
     ui.gateText.textContent = text;
     ui.readings.classList.toggle('dim', !gateLive);
@@ -408,15 +466,16 @@
     const L = Math.min(count, Math.round(3 * fs), NFFT);
     if (L < fs) return;
     const base = (head - L + N) % N;
+    const gate = impOn ? computeImpulseGate(L, base) : null;
     const psd = new Float64Array(NFFT / 2);
     const re = new Float64Array(NFFT), im = new Float64Array(NFFT);
     for (let ax = 0; ax < 3; ax++) {
       re.fill(0); im.fill(0);
-      let mean = 0;
-      for (let k = 0; k < L; k++) mean += raw[ax][(base + k) % N];
-      mean /= L;
+      let mean = 0, wsum = 0;
+      for (let k = 0; k < L; k++) { const g = gate ? gate.w[k] : 1; mean += g * raw[ax][(base + k) % N]; wsum += g; }
+      mean /= Math.max(wsum, 1e-9);
       for (let k = 0; k < L; k++) {
-        const w = 0.5 - 0.5 * Math.cos(2 * Math.PI * k / (L - 1));
+        const w = (0.5 - 0.5 * Math.cos(2 * Math.PI * k / (L - 1))) * (gate ? gate.w[k] : 1);
         re[k] = (raw[ax][(base + k) % N] - mean) * w;
       }
       fft(re, im);
@@ -447,7 +506,8 @@
       const j = (base + k) % N;
       ss += filt[0][j] * filt[0][j] + filt[1][j] * filt[1][j] + filt[2][j] * filt[2][j];
     }
-    stats = { peak, rms: Math.sqrt(ss / L), share: totP > 0 ? bandP / totP : 0 };
+    stats = { peak, rms: gate ? gate.rms : Math.sqrt(ss / L), share: totP > 0 ? bandP / totP : 0 };
+    if (gate) ui.stripCap.textContent = 'Band envelope, last 10 s. Tinted spans are rejected as impulses (' + Math.round(imp.kept * 100) + '% kept).';
     if (!gateLive) return;
     ui.peak.textContent = peak != null ? peak.toFixed(1) : '';
     ui.rms.textContent = stats.rms.toFixed(sensor === 'gyro' ? 2 : 3);
@@ -576,9 +636,50 @@
     }
   }
 
+  function drawStrip() {
+    if (!impOn) return;
+    const [ctx, w, h] = fitCanvas(ui.strip);
+    const padL = 46, padR = 12, padT = 26, padB = 20;
+    const pw = w - padL - padR, ph = h - padT - padB;
+    ctx.fillStyle = C.muted; ctx.font = FONT; ctx.textBaseline = 'top'; ctx.textAlign = 'center';
+    ctx.strokeStyle = C.grid; ctx.lineWidth = 1;
+    for (let sIdx = 0; sIdx <= 5; sIdx++) {
+      const x = padL + pw * sIdx / 5;
+      line(ctx, x, padT, x, padT + ph);
+      ctx.fillText(sIdx === 5 ? 'now' : (sIdx * 2 - 10) + ' s', x, padT + ph + 5);
+    }
+    ctx.strokeStyle = C.rule; line(ctx, padL, padT + ph, padL + pw, padT + ph);
+    const span = imp.span, full = Math.min(N, Math.round(10 * fs));
+    if (span < 2) { emptyText(ctx, w, h, running ? '' : 'Tap Start'); return; }
+    let m = 0;
+    for (let k = 0; k < span; k++) if (imp.env[k] > m) m = imp.env[k];
+    stripScale = Math.max(stripScale * 0.985, m * 1.1, imp.thr * 1.3, floorScale() * 0.5);
+    const xOf = k => padL + pw * (full - span + k) / (full - 1);
+    const yOf = v => padT + ph * (1 - Math.min(1, v / stripScale));
+    ctx.fillStyle = C.mark; ctx.globalAlpha = 0.18;
+    let runStart = -1;
+    for (let k = 0; k <= span; k++) {
+      const rej = k < span && imp.env[k] > imp.thr;
+      if (rej && runStart < 0) runStart = k;
+      if (!rej && runStart >= 0) { ctx.fillRect(xOf(runStart), padT, Math.max(1, xOf(k) - xOf(runStart)), ph); runStart = -1; }
+    }
+    ctx.globalAlpha = 1;
+    ctx.strokeStyle = C.mark; ctx.setLineDash([4, 4]);
+    line(ctx, padL, yOf(imp.thr), padL + pw, yOf(imp.thr));
+    ctx.setLineDash([]);
+    ctx.strokeStyle = C.ink; ctx.lineWidth = 1.5; ctx.lineJoin = 'round';
+    ctx.beginPath();
+    for (let k = 0; k < span; k++) { const x = xOf(k), y = yOf(imp.env[k]); if (k === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y); }
+    ctx.stroke();
+    ctx.fillStyle = C.muted; ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
+    const fmt = v => sensor === 'gyro' ? v.toFixed(1) : v.toFixed(2);
+    ctx.fillText(fmt(stripScale), padL - 6, padT);
+    ctx.fillText('0', padL - 6, padT + ph);
+  }
+
   function loop(ts) {
     if (!running) return;
-    if (ts - lastDraw > 33) { lastDraw = ts; drawTrace(); drawSpec(); }
+    if (ts - lastDraw > 33) { lastDraw = ts; drawTrace(); drawStrip(); drawSpec(); }
     rafId = requestAnimationFrame(loop);
   }
 
@@ -612,6 +713,17 @@
     ui.gaitBtn.textContent = on ? 'Gait subtraction on' : 'Gait subtraction off';
     resetGait();
     refreshGate();
+  }
+  function setImpulse(on) {
+    if (on === impOn) return;
+    impOn = on;
+    ui.impBtn.setAttribute('aria-pressed', String(on));
+    ui.impBtn.textContent = on ? 'Impulse rejection on' : 'Impulse rejection off';
+    ui.stripFig.style.display = on ? '' : 'none';
+    if (on) { imp.span = 0; stripScale = 0; ui.stripCap.textContent = 'Band envelope, last 10 s. Tinted spans are rejected as impulses.'; }
+    if (!gaitOn) resetGait();
+    refreshGate();
+    if (!running) drawStrip();
   }
   function setSensor(s) {
     if (s === sensor) return;
@@ -691,7 +803,8 @@
   ui.win2.addEventListener('click', () => setWindow(2));
   ui.win5.addEventListener('click', () => setWindow(5));
   ui.gaitBtn.addEventListener('click', () => setGait(!gaitOn));
-  window.addEventListener('resize', () => { if (!running) { drawTrace(); drawSpec(); } });
+  ui.impBtn.addEventListener('click', () => setImpulse(!impOn));
+  window.addEventListener('resize', () => { if (!running) { drawTrace(); drawStrip(); drawSpec(); } });
   ui.ver.textContent = 'v' + VERSION;
   drawTrace(); drawSpec();
 })();
