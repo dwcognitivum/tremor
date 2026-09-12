@@ -1,0 +1,330 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#EEF1F4">
+<title>Context detector</title>
+<style>
+  :root {
+    --paper: #EEF1F4; --panel: #F8FAFC; --grid: #DAE1E8; --rule: #B6C1CE;
+    --ink: #14213D; --ink-2: #2F6B9A; --ink-3: #8DA6BF; --band: #F2C56B; --mark: #C8462B; --muted: #5E6B7C;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body {
+    background: var(--paper); color: var(--ink);
+    font-family: "Avenir Next", "Segoe UI", Roboto, system-ui, -apple-system, sans-serif;
+    font-size: 16px; line-height: 1.4;
+    padding: calc(env(safe-area-inset-top) + 18px) 16px calc(env(safe-area-inset-bottom) + 16px);
+    -webkit-text-size-adjust: 100%; overscroll-behavior: none;
+    display: flex; flex-direction: column; gap: 14px;
+  }
+  h1 { font-size: 22px; font-weight: 600; letter-spacing: -0.01em; display: flex; align-items: baseline; gap: 10px; }
+  .ver { font-size: 13px; font-weight: 500; color: var(--muted); }
+  .sub { color: var(--muted); font-size: 14px; margin-top: -8px; }
+  .row { display: flex; gap: 10px; align-items: stretch; }
+  button { font: inherit; border: 0; border-radius: 6px; cursor: pointer; -webkit-tap-highlight-color: transparent; touch-action: manipulation; }
+  button:focus-visible { outline: 2px solid var(--ink-2); outline-offset: 2px; }
+  .primary { flex: 1; background: var(--ink); color: #fff; font-size: 17px; font-weight: 600; padding: 14px 18px; }
+  .secondary { background: transparent; color: var(--ink); border: 1.5px solid var(--rule); padding: 12px 14px; font-size: 15px; }
+  .secondary:disabled { opacity: 0.4; cursor: default; }
+  .banner { border-radius: 8px; padding: 18px 16px; color: #fff; background: #5E6B7C; min-height: 72px; transition: background 0.25s; }
+  .banner b { display: block; font-size: 22px; font-weight: 600; line-height: 1.15; }
+  .banner span { display: block; font-size: 13px; opacity: 0.85; margin-top: 4px; }
+  .readings { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+  .reading { border-top: 2px solid var(--ink); padding-top: 6px; }
+  .reading b { display: block; font-size: 20px; font-weight: 600; font-variant-numeric: tabular-nums; line-height: 1.1; min-height: 1.1em; }
+  .reading small { display: block; color: var(--muted); font-size: 12px; margin-top: 2px; }
+  figure { position: relative; }
+  figure canvas { display: block; width: 100%; background: var(--panel); border: 1.5px solid var(--rule); border-radius: 4px; }
+  figcaption { position: absolute; top: 8px; left: 12px; right: 12px; font-size: 12px; color: var(--muted); pointer-events: none; }
+  #hist { height: 16vh; min-height: 110px; }
+  .labels { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+  .labels button { background: transparent; color: var(--ink); border: 1.5px solid var(--rule); padding: 10px 4px; font-size: 13px; line-height: 1.2; }
+  .labels button[aria-pressed="true"] { background: var(--ink); color: #fff; border-color: var(--ink); }
+  .status { font-size: 14px; color: var(--muted); min-height: 1.4em; }
+  .note { font-size: 12px; color: var(--muted); }
+  h2 { font-size: 14px; font-weight: 600; color: var(--muted); }
+</style>
+</head>
+<body>
+<h1>Context detector <span class="ver" id="ver"></span></h1>
+<p class="sub">Reads the motion sensors and says what the phone is doing. Tap the matching label while it runs to log ground truth for training.</p>
+
+<div class="row">
+  <button class="primary" id="startBtn">Start</button>
+  <button class="secondary" id="csvBtn" disabled>Save CSV</button>
+</div>
+
+<div class="banner" id="banner"><b id="ctx">Tap Start</b><span id="ctxSub"></span></div>
+
+<div class="readings">
+  <div class="reading"><b id="lf"></b><small>movement, m/s²</small></div>
+  <div class="reading"><b id="tilt"></b><small>screen angle, °</small></div>
+  <div class="reading"><b id="sway"></b><small>sway, ° RMS</small></div>
+  <div class="reading"><b id="cad"></b><small>steps/s</small></div>
+  <div class="reading"><b id="ratio"></b><small>gyro/accel ratio</small></div>
+  <div class="reading"><b id="trem"></b><small>gyro 4 to 12 Hz, deg/s</small></div>
+</div>
+
+<figure>
+  <canvas id="hist"></canvas>
+  <figcaption>Last 60 s. Top band: detected context. Bottom band: your label.</figcaption>
+</figure>
+
+<h2>Ground truth</h2>
+<div class="labels" id="labels"></div>
+
+<p class="status" id="status"></p>
+<p class="note">Detection is rule based, from six indicators: low-frequency movement, screen angle from gravity, slow sway of the screen angle, step rhythm, the ratio of rotation to linear vibration in the 4 to 12 Hz band, and gyro power in that band. Thresholds are constants at the top of the script and are first guesses; the logged CSV (four rows a second, indicators plus detected and labelled context) is what tunes them or trains a classifier. Seated versus standing is the least certain call and is marked as a guess. Lying on your back is read from a flat screen facing downward while in hand; lying on your side is not detectable this way and will read as seated.</p>
+
+<script>
+(() => {
+  const VERSION = 2;
+  const IOS = /iP(hone|ad|od)/.test(navigator.userAgent);   // iOS reports gravity with the opposite sign to the spec
+  // thresholds (first guesses; tune from logged data)
+  const SURFACE_LF = 0.04, SURFACE_TREMOR = 0.2;   // on a surface: almost no movement and no tremor on the gyro
+  const MOVING_LF = 0.25;                            // hand or body moving
+  const VEHICLE_LF = 0.10, VEHICLE_RATIO = 9;        // sustained vibration without steps, linear rather than rotational
+  const STAND_SWAY = 0.6;                            // degrees RMS of slow screen-angle sway
+  const FLAT_ANGLE = 25;                             // screen within this many degrees of horizontal
+  const SWING_TILT = 12;                             // screen-angle swing over a stride, degrees RMS
+
+  const CONTEXTS = [
+    ['surface', 'On a surface', '#8DA6BF'],
+    ['seated', 'In hand, seated', '#2E8B57'],
+    ['standing', 'In hand, standing', '#3AA76D'],
+    ['flat', 'Held flat, face up', '#5E9CA8'],
+    ['lying', 'Lying on back', '#3F7F8C'],
+    ['moving', 'Hand moving', '#C9821A'],
+    ['walk_held', 'Walking, phone held up', '#D0342C'],
+    ['walk_swing', 'Walking, arm swinging', '#A02A24'],
+    ['vehicle', 'Vehicle', '#6A4C93'],
+  ];
+  const COLOR = Object.fromEntries(CONTEXTS.map(c => [c[0], c[2]]));
+  const NAME = Object.fromEntries(CONTEXTS.map(c => [c[0], c[1]]));
+
+  const $ = id => document.getElementById(id);
+  const ui = { start: $('startBtn'), csv: $('csvBtn'), banner: $('banner'), ctx: $('ctx'), ctxSub: $('ctxSub'),
+    lf: $('lf'), tilt: $('tilt'), sway: $('sway'), cad: $('cad'), ratio: $('ratio'), trem: $('trem'),
+    hist: $('hist'), labels: $('labels'), status: $('status'), ver: $('ver') };
+  const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+  const C = { grid: css('--grid'), rule: css('--rule'), ink: css('--ink'), muted: css('--muted') };
+  const FONT = '11px "Avenir Next", "Segoe UI", Roboto, system-ui, sans-serif';
+  const status = m => { ui.status.textContent = m; };
+
+  // ---------- filters ----------
+  class Biquad {
+    constructor(b0, b1, b2, a1, a2) { this.b0 = b0; this.b1 = b1; this.b2 = b2; this.a1 = a1; this.a2 = a2; this.z1 = 0; this.z2 = 0; }
+    run(x) { const y = this.b0 * x + this.z1; this.z1 = this.b1 * x - this.a1 * y + this.z2; this.z2 = this.b2 * x - this.a2 * y; return y; }
+  }
+  function biquad(type, f0, rate, Q) {
+    const w = 2 * Math.PI * f0 / rate, c = Math.cos(w), a = Math.sin(w) / (2 * Q);
+    const a0 = 1 + a, a1 = -2 * c, a2 = 1 - a;
+    let b0, b1, b2;
+    if (type === 'lp') { b0 = (1 - c) / 2; b1 = 1 - c; b2 = (1 - c) / 2; } else { b0 = (1 + c) / 2; b1 = -(1 + c); b2 = (1 + c) / 2; }
+    return new Biquad(b0 / a0, b1 / a0, b2 / a0, a1 / a0, a2 / a0);
+  }
+  const chain3 = (lo, hi, rate) => [0, 1, 2].map(() => [biquad('hp', lo, rate, 0.7071), biquad('lp', hi, rate, 0.7071)]);
+  const run3 = (ch, v) => v.map((x, i) => { let y = x; for (const b of ch[i]) y = b.run(y); return y; });
+
+  // ---------- state ----------
+  let fs = 60, running = false, calibrating = false, intervals = [], lastT = null, gotEvents = false, noEventTimer = null, wakeLock = null;
+  let F = null;                       // filters, built after the rate is known
+  let ema = { lf: 0, g412: 0, a412: 0, sway: 0 };
+  let grav = null, gravFast = null;   // slow and fast low-passed gravity vectors
+  const tiltBuf = [];                 // [t, tilt] last 5 s for sway and swing
+  let stepS = { p1: 0, p2: 0, t1: 0, lastT: -10, peakEma: 0, times: [] };
+  let label = '', current = null, currentSub = '', faceDown = false;
+  const history = [];                 // [t, detected, label] every 250 ms
+  const log = [];                     // CSV rows
+  const MAX_LOG = 20000;
+  let anaTimer = null;
+
+  function onMotion(e) {
+    const t = ((e.timeStamp && e.timeStamp < 1e12) ? e.timeStamp : performance.now()) / 1000;
+    const ag = e.accelerationIncludingGravity, a = e.acceleration, r = e.rotationRate;
+    if (!ag || ag.x == null) return;
+    gotEvents = true;
+    if (calibrating) {
+      if (lastT !== null) intervals.push(t - lastT);
+      lastT = t;
+      if (intervals.length >= 90) finishCalibration();
+      return;
+    }
+    lastT = t;
+    const lin = (a && a.x != null) ? [a.x, a.y, a.z] : null;
+    const gyr = (r && r.alpha != null) ? [r.alpha, r.beta, r.gamma] : [0, 0, 0];
+    // gravity: low-pass the including-gravity vector, about half a second
+    const gv = [ag.x, ag.y, ag.z];
+    if (!grav) { grav = gv.slice(); gravFast = gv.slice(); }
+    else for (let i = 0; i < 3; i++) { grav[i] += (gv[i] - grav[i]) * (2 / fs); gravFast[i] += (gv[i] - gravFast[i]) * (10 / fs); }
+    const gn = Math.hypot(gravFast[0], gravFast[1], gravFast[2]) || 9.81;
+    const tilt = Math.acos(Math.min(1, Math.abs(gravFast[2]) / gn)) * 180 / Math.PI;   // 0 = flat, 90 = upright; fast enough to follow an arm swing
+    faceDown = IOS ? gravFast[2] > 0 : gravFast[2] < 0;
+    tiltBuf.push([t, tilt]);
+    while (tiltBuf.length && tiltBuf[0][0] < t - 5) tiltBuf.shift();
+    // linear acceleration: from the sensor if given, else remove the smoothed gravity
+    const la = lin || gv.map((v, i) => v - grav[i]);
+    const lfv = run3(F.lf, la), a412 = run3(F.a412, la), g412 = run3(F.g412, gyr);
+    const k = 1 / fs;   // one-second memory
+    ema.lf += (sq3(lfv) - ema.lf) * k;
+    ema.a412 += (sq3(a412) - ema.a412) * k;
+    ema.g412 += (sq3(g412) - ema.g412) * k;
+    // steps from linear-acceleration magnitude, 0.5 to 3 Hz
+    let sv = Math.hypot(la[0], la[1], la[2]);
+    for (const b of F.step) sv = b.run(sv);
+    const thresh = Math.max(0.3, 0.3 * stepS.peakEma);
+    if (stepS.p1 > stepS.p2 && stepS.p1 >= sv && stepS.p1 > thresh && (stepS.t1 - stepS.lastT) > 0.25) {
+      stepS.peakEma = stepS.peakEma > 0 ? 0.8 * stepS.peakEma + 0.2 * stepS.p1 : stepS.p1;
+      stepS.lastT = stepS.t1;
+      stepS.times.push(stepS.t1);
+      while (stepS.times.length > 8) stepS.times.shift();
+    }
+    stepS.p2 = stepS.p1; stepS.p1 = sv; stepS.t1 = t;
+  }
+  const sq3 = v => v[0] * v[0] + v[1] * v[1] + v[2] * v[2];
+
+  function finishCalibration() {
+    intervals.sort((x, y) => x - y);
+    const med = intervals[Math.floor(intervals.length / 2)];
+    fs = Math.round(Math.min(400, Math.max(20, med > 0 ? 1 / med : 60)));
+    F = { lf: chain3(0.3, 4, fs), a412: chain3(4, 12, fs), g412: chain3(4, 12, fs), step: [biquad('hp', 0.5, fs, 0.7071), biquad('lp', 3, fs, 0.7071)] };
+    calibrating = false; lastT = null;
+    status('Live at ' + fs + ' samples/s.');
+    anaTimer = setInterval(analyse, 250);
+  }
+
+  // ---------- indicators and rules ----------
+  function indicators() {
+    const now = lastT || 0;
+    const lf = Math.sqrt(ema.lf);
+    const tremG = Math.sqrt(ema.g412), tremA = Math.sqrt(ema.a412);
+    const ratio = tremA > 1e-4 ? tremG / tremA : 0;
+    const tilt = tiltBuf.length ? tiltBuf[tiltBuf.length - 1][1] : 0;
+    // sway: RMS of the screen angle about its 5 s mean, slow component only
+    let sway = 0, swing = 0;
+    if (tiltBuf.length > 10) {
+      const m = tiltBuf.reduce((s, x) => s + x[1], 0) / tiltBuf.length;
+      let ss = 0; for (const x of tiltBuf) ss += (x[1] - m) * (x[1] - m);
+      swing = Math.sqrt(ss / tiltBuf.length);          // any tilt variation over 5 s
+      // slow sway: average over 1 s blocks first, then RMS of those
+      const blocks = []; let bs = 0, bn = 0, b0 = tiltBuf[0][0];
+      for (const x of tiltBuf) { if (x[0] - b0 >= 1) { blocks.push(bs / bn); bs = 0; bn = 0; b0 = x[0]; } bs += x[1]; bn++; }
+      if (bn) blocks.push(bs / bn);
+      if (blocks.length > 1) { const bm = blocks.reduce((s, x) => s + x, 0) / blocks.length; sway = Math.sqrt(blocks.reduce((s, x) => s + (x - bm) * (x - bm), 0) / blocks.length); }
+    }
+    // cadence from the last steps, only if recent and regular
+    let cadence = 0, regular = false;
+    const st = stepS.times.filter(x => x > now - 4);
+    if (st.length >= 3) {
+      const iv = []; for (let i = 1; i < st.length; i++) iv.push(st[i] - st[i - 1]);
+      const m = iv.reduce((s, x) => s + x, 0) / iv.length;
+      const cv = Math.sqrt(iv.reduce((s, x) => s + (x - m) * (x - m), 0) / iv.length) / m;
+      if (m >= 0.3 && m <= 1.0 && cv < 0.35) { cadence = 1 / m; regular = true; }
+    }
+    return { lf, tremG, tremA, ratio, tilt, sway, swing, cadence, regular, faceDown };
+  }
+  function classify(x) {
+    if (x.lf < SURFACE_LF && x.tremG < SURFACE_TREMOR) return ['surface', 'no movement, no tremor'];
+    if (x.regular) return x.swing > SWING_TILT ? ['walk_swing', 'steps at ' + x.cadence.toFixed(1) + '/s, screen angle swinging'] : ['walk_held', 'steps at ' + x.cadence.toFixed(1) + '/s, screen steady'];
+    if (x.lf > VEHICLE_LF && x.ratio < VEHICLE_RATIO && x.ratio > 0) return ['vehicle', 'sustained vibration, mostly linear, no steps'];
+    if (x.lf > MOVING_LF) return ['moving', 'movement above ' + MOVING_LF + ' m/s²'];
+    if (x.tilt < FLAT_ANGLE) return x.faceDown ? ['lying', 'screen flat and facing down, in hand'] : ['flat', 'screen within ' + FLAT_ANGLE + '° of horizontal, face up'];
+    if (x.sway > STAND_SWAY) return ['standing', 'slow sway ' + x.sway.toFixed(1) + '° (guess)'];
+    return ['seated', 'still, little sway (guess)'];
+  }
+  function analyse() {
+    if (!F) return;
+    const x = indicators();
+    const [ctx, why] = classify(x);
+    current = ctx; currentSub = why;
+    ui.ctx.textContent = NAME[ctx]; ui.ctxSub.textContent = why; ui.banner.style.background = COLOR[ctx];
+    ui.lf.textContent = x.lf.toFixed(2); ui.tilt.textContent = Math.round(x.tilt); ui.sway.textContent = x.sway.toFixed(2);
+    ui.cad.textContent = x.cadence ? x.cadence.toFixed(1) : '0'; ui.ratio.textContent = x.ratio ? x.ratio.toFixed(0) : ''; ui.trem.textContent = x.tremG.toFixed(2);
+    const now = lastT || 0;
+    history.push([now, ctx, label]);
+    while (history.length && history[0][0] < now - 60) history.shift();
+    if (log.length < MAX_LOG) log.push([now.toFixed(2), x.lf.toFixed(3), x.tilt.toFixed(1), x.sway.toFixed(3), x.swing.toFixed(2), x.cadence.toFixed(2), x.ratio.toFixed(1), x.tremG.toFixed(3), x.tremA.toFixed(4), ctx, label]);
+    ui.csv.disabled = log.length === 0;
+    drawHist();
+  }
+
+  // ---------- history strip ----------
+  function drawHist() {
+    const c = ui.hist, dpr = window.devicePixelRatio || 1, w = c.clientWidth, h = c.clientHeight;
+    const W = Math.round(w * dpr), H = Math.round(h * dpr);
+    if (c.width !== W || c.height !== H) { c.width = W; c.height = H; }
+    const ctx = c.getContext('2d'); ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.clearRect(0, 0, w, h);
+    const padL = 12, padR = 12, padT = 28, padB = 20, pw = w - padL - padR;
+    const bandH = (h - padT - padB - 8) / 2;
+    const now = lastT || 0, xOf = t => padL + pw * (1 - Math.min(1, Math.max(0, (now - t) / 60)));
+    ctx.fillStyle = C.muted; ctx.font = FONT; ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+    for (let s = 0; s <= 60; s += 15) ctx.fillText(s === 60 ? 'now' : (s - 60) + ' s', padL + pw * s / 60, h - padB + 5);
+    if (!history.length) { ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(running ? 'Collecting' : 'Tap Start', w / 2, h / 2); return; }
+    for (let i = 0; i < history.length; i++) {
+      const [t, d, l] = history[i], t2 = i + 1 < history.length ? history[i + 1][0] : now;
+      const x1 = xOf(t), x2 = xOf(t2), ww = Math.max(1, x2 - x1);
+      ctx.fillStyle = COLOR[d]; ctx.fillRect(x1, padT, ww, bandH);
+      if (l) { ctx.fillStyle = COLOR[l]; ctx.fillRect(x1, padT + bandH + 8, ww, bandH); }
+    }
+    ctx.strokeStyle = C.rule; ctx.lineWidth = 1;
+    ctx.strokeRect(padL, padT, pw, bandH); ctx.strokeRect(padL, padT + bandH + 8, pw, bandH);
+  }
+
+  // ---------- controls ----------
+  for (const [id, name] of CONTEXTS) {
+    const b = document.createElement('button'); b.textContent = name; b.setAttribute('aria-pressed', 'false');
+    b.addEventListener('click', () => {
+      label = label === id ? '' : id;
+      for (const bb of ui.labels.children) bb.setAttribute('aria-pressed', String(bb === b && label === id));
+      status(label ? 'Logging label: ' + name : 'Label cleared.');
+    });
+    ui.labels.appendChild(b);
+  }
+  async function start() {
+    if (running) { stop(); return; }
+    if (typeof DeviceMotionEvent === 'undefined') { status('This browser does not expose motion sensors.'); return; }
+    if (typeof DeviceMotionEvent.requestPermission === 'function') {
+      try { const r = await DeviceMotionEvent.requestPermission(); if (r !== 'granted') { status('Motion access was refused. Reload and allow it.'); return; } }
+      catch (err) { status('Motion access could not be requested. Open the page over HTTPS.'); return; }
+    }
+    if (!window.isSecureContext) { status('Not on HTTPS, so the browser will not deliver sensor data.'); return; }
+    running = true; calibrating = true; intervals = []; lastT = null; gotEvents = false; grav = null; gravFast = null; tiltBuf.length = 0;
+    ema = { lf: 0, g412: 0, a412: 0, sway: 0 }; stepS = { p1: 0, p2: 0, t1: 0, lastT: -10, peakEma: 0, times: [] };
+    history.length = 0; log.length = 0;
+    window.addEventListener('devicemotion', onMotion);
+    ui.start.textContent = 'Stop'; ui.ctx.textContent = 'Measuring sample rate'; ui.ctxSub.textContent = ''; ui.banner.style.background = '#5E6B7C';
+    status('Measuring the sample rate.');
+    noEventTimer = setTimeout(() => { if (!gotEvents) status('No motion data is arriving. Check HTTPS and motion access.'); }, 3000);
+    try { if (navigator.wakeLock) wakeLock = await navigator.wakeLock.request('screen'); } catch (err) {}
+  }
+  function stop() {
+    running = false; calibrating = false;
+    window.removeEventListener('devicemotion', onMotion);
+    clearInterval(anaTimer); clearTimeout(noEventTimer);
+    ui.start.textContent = 'Start'; ui.ctx.textContent = 'Stopped'; ui.ctxSub.textContent = ''; ui.banner.style.background = '#5E6B7C';
+    status('Stopped. ' + Math.round(log.length / 4) + ' s logged.');
+    if (wakeLock) { wakeLock.release().catch(() => {}); wakeLock = null; }
+  }
+  function saveCsv() {
+    if (!log.length) return;
+    const rows = ['t_s,movement_ms2,tilt_deg,sway_deg,swing_deg,cadence,ratio_g_a,gyro_4_12,accel_4_12,detected,label'];
+    for (const r of log) rows.push(r.join(','));
+    const blob = new Blob([rows.join('\n')], { type: 'text/csv' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob); a.download = 'context_v' + VERSION + '_' + Math.round(log.length / 4) + 's.csv';
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+  }
+  ui.start.addEventListener('click', start);
+  ui.csv.addEventListener('click', saveCsv);
+  window.addEventListener('resize', drawHist);
+  ui.ver.textContent = 'v' + VERSION;
+  drawHist();
+})();
+</script>
+</body>
+</html>
