@@ -129,11 +129,11 @@
 <div class="row">
   <button class="secondary" id="csvBtn" disabled>Save CSV</button>
 </div>
-<p class="note">Browsers deliver motion at about 60 samples a second on both iPhone and Android, which is enough to resolve 12 Hz. The page needs HTTPS. On iPhone, Safari asks for motion access when you tap Start. Save CSV keeps about the first ten minutes of the raw, evenly resampled signal, before any gait subtraction. Gait subtraction learns the repeating waveform of each step from the accelerometer's rhythm and removes it before filtering; it needs a steady walk of about ten steps to lock on. Impulse rejection drops the moments where the band envelope spikes above twice its quiet floor, so footfalls are left out of the readings without needing to detect steps.</p>
+<p class="note">Browsers deliver motion at about 60 samples a second on both iPhone and Android, which is enough to resolve 12 Hz. The page needs HTTPS. On iPhone, Safari asks for motion access when you tap Start. Save CSV records both sensors, raw and evenly resampled, before any gait subtraction, whichever one is displayed, plus a state column (0 still, 1 moving, 2 walking detected). It keeps about the first ten minutes. Gait subtraction learns the repeating waveform of each step from the accelerometer's rhythm and removes it before filtering; it needs a steady walk of about ten steps to lock on. Impulse rejection drops the moments where the band envelope spikes above twice its quiet floor, so footfalls are left out of the readings without needing to detect steps.</p>
 
 <script>
 (() => {
-  const VERSION = 7;   // bump this on every change to the page
+  const VERSION = 8;   // bump this on every change to the page
   let bandLo = 4, bandHi = 12, spanSec = 5;
   const N = 1024;          // ring buffer length in samples
   const MAX_ROWS = 40000;  // CSV cap
@@ -315,7 +315,7 @@
     return [biquad('hp', bandLo, fs, Q1), biquad('hp', bandLo, fs, Q2), biquad('lp', bandHi, fs, Q1), biquad('lp', bandHi, fs, Q2)];
   }
   function resetBuffers() {
-    head = 0; count = 0; psdS = null; yScale = 0; rows = []; lastRaw = null; gridT = null; t0 = null;
+    head = 0; count = 0; psdS = null; yScale = 0; lastRaw = null; gridT = null;
     chains = [makeChain(), makeChain(), makeChain()];
     stats = { peak: null, rms: 0, share: 0 };
     resetGait();
@@ -373,6 +373,14 @@
     ui.gateText.textContent = text;
     ui.readings.classList.remove('dim');
   }
+  let accelHasGravity = false;
+  function readAll(e) {
+    const r = e.rotationRate, a = e.acceleration, ag = e.accelerationIncludingGravity;
+    const g = (r && r.alpha != null) ? [r.alpha, r.beta, r.gamma] : null;
+    let acc = (a && a.x != null) ? [a.x, a.y, a.z] : null;
+    if (!acc && ag && ag.x != null) { acc = [ag.x, ag.y, ag.z]; accelHasGravity = true; }
+    return { g, acc };
+  }
   function onMotion(e) {
     const t = ((e.timeStamp && e.timeStamp < 1e12) ? e.timeStamp : performance.now()) / 1000;
     lastEventT = t;
@@ -387,15 +395,16 @@
       return;
     }
     gotEvents = true;
+    const all = readAll(e);
 
     if (calibrating) {
       if (lastRaw) intervals.push(t - lastRaw.t);
-      lastRaw = { t, v };
+      lastRaw = { t, v, g: all.g, acc: all.acc };
       if (intervals.length >= 90) finishCalibration();
       return;
     }
-    if (!lastRaw || t - lastRaw.t > 0.5) { lastRaw = { t, v }; gridT = t; return; }
-    if (t <= lastRaw.t) { lastRaw = { t, v }; return; }
+    if (!lastRaw || t - lastRaw.t > 0.5) { lastRaw = { t, v, g: all.g, acc: all.acc }; gridT = t; return; }
+    if (t <= lastRaw.t) { lastRaw = { t, v, g: all.g, acc: all.acc }; return; }
 
     const dt = 1 / fs;
     while (gridT <= t) {
@@ -411,11 +420,13 @@
       }
       if (t0 === null) t0 = gridT;
       if (rows.length < MAX_ROWS) {
-        rows.push([(gridT - t0).toFixed(4), orig[0].toFixed(4), orig[1].toFixed(4), orig[2].toFixed(4)]);
+        const lerp = (p, q) => (p && q) ? [0, 1, 2].map(i => (p[i] + a * (q[i] - p[i])).toFixed(4)) : ['', '', ''];
+        const state = moving ? (gaitRecent() ? 2 : 1) : 0;
+        rows.push([(gridT - t0).toFixed(4), ...lerp(lastRaw.g, all.g), ...lerp(lastRaw.acc, all.acc), state]);
       }
       head = (head + 1) % N; count++; gridT += dt;
     }
-    lastRaw = { t, v };
+    lastRaw = { t, v, g: all.g, acc: all.acc };
   }
   function finishCalibration() {
     intervals.sort((a, b) => a - b);
@@ -732,7 +743,6 @@
     ui.accel.setAttribute('aria-pressed', String(s === 'accel'));
     ui.rmsLabel.textContent = 'band RMS, ' + unit();
     updateCaptions();
-    rows = []; ui.csv.disabled = true;
     clearReadings();
     if (running && !calibrating) resetBuffers();
     if (!running) { drawTrace(); drawSpec(); }
@@ -758,6 +768,7 @@
       return;
     }
     running = true; calibrating = true; intervals = []; missing = 0; gotEvents = false;
+    rows = []; t0 = null; accelHasGravity = false;
     resetBuffers();
     ui.start.textContent = 'Stop'; ui.csv.disabled = true;
     ui.peak.textContent = ''; ui.rms.textContent = ''; ui.share.textContent = ''; ui.rate.textContent = '';
@@ -785,11 +796,12 @@
 
   function saveCsv() {
     if (!rows.length) return;
-    const header = 't_s,' + (sensor === 'gyro' ? 'gx_degs,gy_degs,gz_degs' : 'ax_ms2,ay_ms2,az_ms2') + '\n';
+    const acc = accelHasGravity ? 'ax_ms2_with_gravity,ay_ms2_with_gravity,az_ms2_with_gravity' : 'ax_ms2,ay_ms2,az_ms2';
+    const header = 't_s,gx_degs,gy_degs,gz_degs,' + acc + ',state\n';
     const blob = new Blob([header + rows.map(r => r.join(',')).join('\n')], { type: 'text/csv' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
-    a.download = 'tremor_v' + VERSION + '_' + sensor + '_' + fs + 'hz.csv';
+    a.download = 'tremor_v' + VERSION + '_' + fs + 'hz.csv';
     document.body.appendChild(a); a.click(); a.remove();
     setTimeout(() => URL.revokeObjectURL(a.href), 2000);
   }
