@@ -1,0 +1,399 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#EEF1F4">
+<title>Gait</title>
+<style>
+  :root {
+    --paper: #EEF1F4; --panel: #F8FAFC; --grid: #DAE1E8; --rule: #B6C1CE;
+    --ink: #14213D; --ink-2: #2F6B9A; --ink-3: #8DA6BF; --band: #F2C56B; --mark: #C8462B; --muted: #5E6B7C;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body {
+    background: var(--paper); color: var(--ink);
+    font-family: "Avenir Next", "Segoe UI", Roboto, system-ui, -apple-system, sans-serif;
+    font-size: 16px; line-height: 1.4;
+    padding: calc(env(safe-area-inset-top) + 18px) 16px calc(env(safe-area-inset-bottom) + 16px);
+    -webkit-text-size-adjust: 100%; overscroll-behavior: none;
+    display: flex; flex-direction: column; gap: 14px;
+  }
+  h1 { font-size: 22px; font-weight: 600; letter-spacing: -0.01em; display: flex; align-items: baseline; gap: 10px; }
+  .ver { font-size: 13px; font-weight: 500; color: var(--muted); }
+  .sub { color: var(--muted); font-size: 14px; margin-top: -8px; }
+  .row { display: flex; gap: 10px; align-items: stretch; }
+  button { font: inherit; border: 0; border-radius: 6px; cursor: pointer; -webkit-tap-highlight-color: transparent; touch-action: manipulation; }
+  button:focus-visible { outline: 2px solid var(--ink-2); outline-offset: 2px; }
+  .primary { flex: 1; background: var(--ink); color: #fff; font-size: 17px; font-weight: 600; padding: 14px 18px; }
+  .secondary { background: transparent; color: var(--ink); border: 1.5px solid var(--rule); padding: 12px 14px; font-size: 15px; }
+  .secondary:disabled { opacity: 0.4; cursor: default; }
+  .banner { border-radius: 8px; padding: 14px 16px; color: #fff; background: #5E6B7C; transition: background 0.25s; }
+  .banner b { display: block; font-size: 19px; font-weight: 600; line-height: 1.15; }
+  .banner span { display: block; font-size: 13px; opacity: 0.85; margin-top: 3px; }
+  .readings { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+  .reading { border-top: 2px solid var(--ink); padding-top: 6px; }
+  .reading b { display: block; font-size: 20px; font-weight: 600; font-variant-numeric: tabular-nums; line-height: 1.1; min-height: 1.1em; }
+  .reading small { display: block; color: var(--muted); font-size: 12px; margin-top: 2px; }
+  figure { position: relative; }
+  figure canvas { display: block; width: 100%; background: var(--panel); border: 1.5px solid var(--rule); border-radius: 4px; }
+  figcaption { position: absolute; top: 8px; left: 12px; right: 12px; font-size: 12px; color: var(--muted); pointer-events: none; display: flex; gap: 8px; align-items: center; }
+  .sw { display: inline-block; width: 14px; height: 3px; border-radius: 2px; flex: none; }
+  #live { height: 18vh; min-height: 120px; }
+  #tplA, #tplG { height: 20vh; min-height: 130px; }
+  .status { font-size: 14px; color: var(--muted); min-height: 1.4em; }
+  .note { font-size: 12px; color: var(--muted); }
+</style>
+</head>
+<body>
+<h1>Gait <span class="ver" id="ver"></span></h1>
+<p class="sub">Walk naturally with the phone in hand, held up or swinging. Steps are detected from the vertical acceleration, and each step is compared with a template for its foot.</p>
+
+<div class="row">
+  <button class="primary" id="startBtn">Start</button>
+  <button class="secondary" id="resetBtn" disabled>Reset</button>
+  <button class="secondary" id="csvBtn" disabled>Save CSV</button>
+</div>
+
+<div class="banner" id="banner"><b id="state">Tap Start</b><span id="stateSub"></span></div>
+
+<div class="readings">
+  <div class="reading"><b id="cad"></b><small>steps/s</small></div>
+  <div class="reading"><b id="reg"></b><small>step timing spread, %</small></div>
+  <div class="reading"><b id="consist"></b><small>step consistency</small></div>
+  <div class="reading"><b id="asym"></b><small>left/right difference</small></div>
+  <div class="reading"><b id="impact"></b><small>impact peak, m/s²</small></div>
+  <div class="reading"><b id="lever"></b><small>lever arm, cm</small></div>
+</div>
+
+<figure>
+  <canvas id="live"></canvas>
+  <figcaption>Vertical acceleration, last 5 s, with detected steps marked.</figcaption>
+</figure>
+<figure>
+  <canvas id="tplA"></canvas>
+  <figcaption><span>Vertical acceleration over one step, 0 to 100% of the cycle.</span> <span class="sw" style="background:var(--ink)"></span>foot A <span class="sw" style="background:var(--mark)"></span>foot B</figcaption>
+</figure>
+<figure>
+  <canvas id="tplG"></canvas>
+  <figcaption><span>Gyro magnitude over one step.</span></figcaption>
+</figure>
+
+<p class="status" id="status"></p>
+<p class="note">Everything is computed in the gravity frame so it doesn't depend on how the phone is held: vertical acceleration along gravity, horizontal acceleration across it, gyro magnitude and screen angle. Each step is resampled to 64 points and assigned to whichever foot template it resembles, so a missed step doesn't swap left and right. Step consistency is the correlation of each step with its foot template; left/right difference is one minus the correlation between the two templates. The lever arm is the distance from the sensor to the point the phone pivots about, fitted from 2 to 6 Hz rotation against acceleration over the last 4 s. Save CSV writes every step window with its features.</p>
+
+<script>
+(() => {
+  const VERSION = 1;
+  const BINS = 64, MAX_STEPS = 400;
+  const WALK_MIN_LF = 0.7, STEP_MIN = 0.3, STEP_MAX = 1.6, SWING_TILT = 7, SWING_LF = 2.5;
+
+  const $ = id => document.getElementById(id);
+  const ui = { start: $('startBtn'), reset: $('resetBtn'), csv: $('csvBtn'), banner: $('banner'), state: $('state'), stateSub: $('stateSub'),
+    cad: $('cad'), reg: $('reg'), consist: $('consist'), asym: $('asym'), impact: $('impact'), lever: $('lever'),
+    live: $('live'), tplA: $('tplA'), tplG: $('tplG'), status: $('status'), ver: $('ver') };
+  const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+  const C = { grid: css('--grid'), rule: css('--rule'), ink: css('--ink'), ink2: css('--ink-2'), ink3: css('--ink-3'), mark: css('--mark'), muted: css('--muted'), band: css('--band') };
+  const FONT = '11px "Avenir Next", "Segoe UI", Roboto, system-ui, sans-serif';
+  const status = m => { ui.status.textContent = m; };
+
+  class Biquad {
+    constructor(b0, b1, b2, a1, a2) { this.b0 = b0; this.b1 = b1; this.b2 = b2; this.a1 = a1; this.a2 = a2; this.z1 = 0; this.z2 = 0; }
+    run(x) { const y = this.b0 * x + this.z1; this.z1 = this.b1 * x - this.a1 * y + this.z2; this.z2 = this.b2 * x - this.a2 * y; return y; }
+  }
+  function biquad(type, f0, rate, Q) {
+    const w = 2 * Math.PI * f0 / rate, c = Math.cos(w), a = Math.sin(w) / (2 * Q);
+    const a0 = 1 + a, a1 = -2 * c, a2 = 1 - a;
+    let b0, b1, b2;
+    if (type === 'lp') { b0 = (1 - c) / 2; b1 = 1 - c; b2 = (1 - c) / 2; } else { b0 = (1 + c) / 2; b1 = -(1 + c); b2 = (1 + c) / 2; }
+    return new Biquad(b0 / a0, b1 / a0, b2 / a0, a1 / a0, a2 / a0);
+  }
+  const chainN = (n, lo, hi, rate) => Array.from({ length: n }, () => [biquad('hp', lo, rate, 0.7071), biquad('lp', hi, rate, 0.7071)]);
+  const runN = (ch, v) => v.map((x, i) => { let y = x; for (const b of ch[i]) y = b.run(y); return y; });
+
+  let fs = 60, running = false, calibrating = false, intervals = [], lastT = null, gotEvents = false, noEventTimer = null, wakeLock = null;
+  let F = null, grav = null, gravFast = null, lfEma = 0, prevGyro = null;
+  const buf = [];           // [t, va, ha, gm, tilt, vbp] last 6 s
+  const kin = [];           // [t, alpha_bp[3], acc_bp[3]] last 4 s for the lever-arm fit
+  const tiltBuf = [];
+  let stepS = { p1: 0, p2: 0, t1: 0, lastT: -10, peakEma: 0, times: [] };
+  let steps = [], templ = null, count = [0, 0], nextFoot = 0, lastStepT = null;
+  let leverCm = null, leverR2 = 0, lastFit = 0, yLive = 1, yTplA = 1, yTplG = 1, anaTimer = null;
+  const newTempl = () => [0, 1].map(() => ({ va: new Float32Array(BINS), ha: new Float32Array(BINS), gm: new Float32Array(BINS), tilt: new Float32Array(BINS) }));
+
+  function onMotion(e) {
+    const t = ((e.timeStamp && e.timeStamp < 1e12) ? e.timeStamp : performance.now()) / 1000;
+    const ag = e.accelerationIncludingGravity, a = e.acceleration, r = e.rotationRate;
+    if (!ag || ag.x == null) return;
+    gotEvents = true;
+    if (calibrating) { if (lastT !== null) intervals.push(t - lastT); lastT = t; if (intervals.length >= 90) finishCalibration(); return; }
+    lastT = t;
+    const gv = [ag.x, ag.y, ag.z];
+    if (!grav) { grav = gv.slice(); gravFast = gv.slice(); }
+    else for (let i = 0; i < 3; i++) { grav[i] += (gv[i] - grav[i]) * (2 / fs); gravFast[i] += (gv[i] - gravFast[i]) * (10 / fs); }
+    const gn = Math.hypot(grav[0], grav[1], grav[2]) || 9.81, gu = grav.map(v => v / gn);
+    const la = (a && a.x != null) ? [a.x, a.y, a.z] : gv.map((v, i) => v - grav[i]);
+    const va = la[0] * gu[0] + la[1] * gu[1] + la[2] * gu[2];
+    const ha = Math.hypot(la[0] - va * gu[0], la[1] - va * gu[1], la[2] - va * gu[2]);
+    const gyr = (r && r.alpha != null) ? [r.alpha, r.beta, r.gamma] : [0, 0, 0];
+    const gm = Math.hypot(gyr[0], gyr[1], gyr[2]);
+    const gfn = Math.hypot(gravFast[0], gravFast[1], gravFast[2]) || 9.81;
+    const tilt = Math.acos(Math.min(1, Math.abs(gravFast[2]) / gfn)) * 180 / Math.PI;
+    tiltBuf.push([t, tilt]); while (tiltBuf.length && tiltBuf[0][0] < t - 3) tiltBuf.shift();
+    const lfv = runN(F.lf, la); lfEma += (lfv[0] * lfv[0] + lfv[1] * lfv[1] + lfv[2] * lfv[2] - lfEma) / fs;
+    let vbp = va; for (const b of F.step) vbp = b.run(vbp);
+    buf.push([t, va, ha, gm, tilt, vbp]); while (buf.length && buf[0][0] < t - 6) buf.shift();
+    // angular acceleration and linear acceleration, band-passed 2 to 6 Hz, for the lever-arm fit
+    const w = gyr.map(v => v * Math.PI / 180);
+    if (prevGyro) {
+      const alpha = w.map((v, i) => (v - prevGyro[i]) * fs);
+      kin.push([t, runN(F.alpha, alpha), runN(F.acc, la)]); while (kin.length && kin[0][0] < t - 4) kin.shift();
+    }
+    prevGyro = w;
+    // step detection on the band-passed vertical acceleration
+    const lf = Math.sqrt(lfEma), thresh = Math.max(0.25, 0.3 * stepS.peakEma);
+    if (stepS.p1 > stepS.p2 && stepS.p1 >= vbp && stepS.p1 > thresh && (stepS.t1 - stepS.lastT) > 0.25 && lf > WALK_MIN_LF) {
+      stepS.peakEma = stepS.peakEma > 0 ? 0.8 * stepS.peakEma + 0.2 * stepS.p1 : stepS.p1;
+      stepS.lastT = stepS.t1;
+      onStep(stepS.t1, lf);
+    }
+    stepS.p2 = stepS.p1; stepS.p1 = vbp; stepS.t1 = t;
+  }
+  function finishCalibration() {
+    intervals.sort((x, y) => x - y);
+    const med = intervals[Math.floor(intervals.length / 2)];
+    fs = Math.round(Math.min(400, Math.max(20, med > 0 ? 1 / med : 60)));
+    F = { lf: chainN(3, 0.3, 4, fs), step: [biquad('hp', 0.5, fs, 0.7071), biquad('lp', 3, fs, 0.7071)], alpha: chainN(3, 2, 6, fs), acc: chainN(3, 2, 6, fs) };
+    calibrating = false; lastT = null;
+    status('Live at ' + fs + ' samples/s. Start walking.');
+    anaTimer = setInterval(analyse, 250);
+  }
+
+  // ---------- steps and templates ----------
+  function segToBins(seg, start, dur) {
+    const out = { va: new Float32Array(BINS), ha: new Float32Array(BINS), gm: new Float32Array(BINS), tilt: new Float32Array(BINS) };
+    let j = 0;
+    for (let b = 0; b < BINS; b++) {
+      const tb = start + (b + 0.5) / BINS * dur;
+      while (j < seg.length - 1 && seg[j + 1][0] <= tb) j++;
+      const p = seg[j], q = seg[Math.min(j + 1, seg.length - 1)], span = q[0] - p[0];
+      const w = span > 0 ? Math.min(1, Math.max(0, (tb - p[0]) / span)) : 0;
+      out.va[b] = p[1] + w * (q[1] - p[1]); out.ha[b] = p[2] + w * (q[2] - p[2]); out.gm[b] = p[3] + w * (q[3] - p[3]); out.tilt[b] = p[4] + w * (q[4] - p[4]);
+    }
+    return out;
+  }
+  function corr(a, b) {
+    let ma = 0, mb = 0; for (let i = 0; i < a.length; i++) { ma += a[i]; mb += b[i]; } ma /= a.length; mb /= b.length;
+    let sab = 0, saa = 0, sbb = 0;
+    for (let i = 0; i < a.length; i++) { const x = a[i] - ma, y = b[i] - mb; sab += x * y; saa += x * x; sbb += y * y; }
+    return saa > 0 && sbb > 0 ? sab / Math.sqrt(saa * sbb) : 0;
+  }
+  function dist(bins, tp) { let d = 0; for (let i = 0; i < BINS; i++) { const e = bins.va[i] - tp.va[i], f = bins.gm[i] - tp.gm[i]; d += e * e + f * f / 400; } return d; }
+  function onStep(ts, lf) {
+    stepS.times.push(ts); while (stepS.times.length > 12) stepS.times.shift();
+    if (lastStepT !== null) {
+      const dur = ts - lastStepT;
+      if (dur >= STEP_MIN && dur <= STEP_MAX) {
+        const seg = buf.filter(x => x[0] >= lastStepT - 0.02 && x[0] <= ts + 0.02);
+        if (seg.length >= 6) {
+          const bins = segToBins(seg, lastStepT, dur);
+          if (!templ) templ = newTempl();
+          let foot;
+          if (count[0] >= 2 && count[1] >= 2) foot = dist(bins, templ[0]) <= dist(bins, templ[1]) ? 0 : 1;
+          else foot = nextFoot;
+          const c = count[foot] >= 1 ? corr(bins.va, templ[foot].va) : null;
+          const n = count[foot], al = n < 8 ? 1 / (n + 1) : 0.1;
+          for (const k of ['va', 'ha', 'gm', 'tilt']) for (let i = 0; i < BINS; i++) templ[foot][k][i] += al * (bins[k][i] - templ[foot][k][i]);
+          count[foot]++; nextFoot = 1 - foot;
+          let peak = 0; for (let i = 0; i < BINS; i++) peak = Math.max(peak, Math.abs(bins.va[i]));
+          steps.push({ t: ts, dur, foot, corr: c, peak, lf, bins });
+          if (steps.length > MAX_STEPS) steps.shift();
+          ui.csv.disabled = false; ui.reset.disabled = false;
+        }
+      }
+    }
+    lastStepT = ts;
+  }
+
+  // ---------- lever arm: least squares of accel on angular acceleration, 3x3 ----------
+  function fitLever() {
+    if (kin.length < 2 * fs) return;
+    const AtA = [[0, 0, 0], [0, 0, 0], [0, 0, 0]], AtY = [[0, 0, 0], [0, 0, 0], [0, 0, 0]];
+    let ym = [0, 0, 0];
+    for (const [, A, Y] of kin) for (let i = 0; i < 3; i++) { ym[i] += Y[i]; for (let j = 0; j < 3; j++) { AtA[i][j] += A[i] * A[j]; AtY[i][j] += A[i] * Y[j]; } }
+    const lam = 1e-3 * (AtA[0][0] + AtA[1][1] + AtA[2][2]) / 3 + 1e-9;   // ridge term so a single-axis rotation still solves
+    for (let i = 0; i < 3; i++) AtA[i][i] += lam;
+    const inv = inv3(AtA); if (!inv) return;
+    const M = [[0, 0, 0], [0, 0, 0], [0, 0, 0]];
+    for (let i = 0; i < 3; i++) for (let j = 0; j < 3; j++) for (let k = 0; k < 3; k++) M[i][j] += inv[i][k] * AtY[k][j];
+    let ssRes = 0, ssTot = 0; ym = ym.map(v => v / kin.length);
+    for (const [, A, Y] of kin) for (let j = 0; j < 3; j++) { const p = A[0] * M[0][j] + A[1] * M[1][j] + A[2] * M[2][j]; ssRes += (Y[j] - p) ** 2; ssTot += (Y[j] - ym[j]) ** 2; }
+    const S = [[0, 0, 0], [0, 0, 0], [0, 0, 0]];
+    for (let i = 0; i < 3; i++) for (let j = 0; j < 3; j++) S[i][j] = 0.5 * (M[i][j] - M[j][i]);
+    const r = [S[1][2], S[2][0], S[0][1]];
+    leverCm = 100 * Math.hypot(r[0], r[1], r[2]); leverR2 = ssTot > 0 ? 1 - ssRes / ssTot : 0;
+  }
+  function inv3(m) {
+    const [a, b, c] = m[0], [d, e, f] = m[1], [g, h, i] = m[2];
+    const det = a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g);
+    if (Math.abs(det) < 1e-12) return null;
+    return [[(e * i - f * h) / det, (c * h - b * i) / det, (b * f - c * e) / det],
+            [(f * g - d * i) / det, (a * i - c * g) / det, (c * d - a * f) / det],
+            [(d * h - e * g) / det, (b * g - a * h) / det, (a * e - b * d) / det]];
+  }
+
+  // ---------- readings ----------
+  function analyse() {
+    if (!F) return;
+    const now = lastT || 0;
+    const recent = stepS.times.filter(x => x > now - 5);
+    let cadence = 0, cv = 0, walking = false;
+    if (recent.length >= 3) {
+      const iv = []; for (let i = 1; i < recent.length; i++) iv.push(recent[i] - recent[i - 1]);
+      const m = iv.reduce((s, x) => s + x, 0) / iv.length;
+      cv = Math.sqrt(iv.reduce((s, x) => s + (x - m) * (x - m), 0) / iv.length) / m;
+      if (m >= STEP_MIN && m <= STEP_MAX) { cadence = m <= 1.05 ? 1 / m : 2 / m; walking = now - recent[recent.length - 1] < 2; }
+    }
+    let swing = 0;
+    if (tiltBuf.length > 10) { const m = tiltBuf.reduce((s, x) => s + x[1], 0) / tiltBuf.length; swing = Math.sqrt(tiltBuf.reduce((s, x) => s + (x[1] - m) ** 2, 0) / tiltBuf.length); }
+    const lf = Math.sqrt(lfEma);
+    const swinging = swing > SWING_TILT || lf > SWING_LF;
+    if (walking) { ui.banner.style.background = swinging ? '#A02A24' : '#D0342C'; ui.state.textContent = swinging ? 'Walking, arm swinging' : 'Walking, phone held up'; ui.stateSub.textContent = steps.length + ' steps captured, ' + count[0] + ' foot A, ' + count[1] + ' foot B'; }
+    else { ui.banner.style.background = '#5E6B7C'; ui.state.textContent = running ? 'Not walking' : 'Stopped'; ui.stateSub.textContent = steps.length ? steps.length + ' steps captured' : ''; }
+    if (now - lastFit > 1 && walking) { lastFit = now; fitLever(); }
+    const last10 = steps.slice(-10);
+    const cons = last10.map(s => s.corr).filter(v => v != null);
+    const consM = cons.length ? cons.reduce((s, x) => s + x, 0) / cons.length : null;
+    const asym = (templ && count[0] >= 3 && count[1] >= 3) ? 1 - corr(templ[0].va, templ[1].va) : null;
+    const impact = last10.length ? last10.reduce((s, x) => s + x.peak, 0) / last10.length : null;
+    ui.cad.textContent = cadence ? cadence.toFixed(2) : '';
+    ui.reg.textContent = cadence ? Math.round(cv * 100) : '';
+    ui.consist.textContent = consM != null ? consM.toFixed(2) : '';
+    ui.asym.textContent = asym != null ? asym.toFixed(2) : '';
+    ui.impact.textContent = impact != null ? impact.toFixed(2) : '';
+    ui.lever.textContent = leverCm != null ? leverCm.toFixed(1) + (leverR2 < 0.5 ? '?' : '') : '';
+    draw();
+  }
+
+  // ---------- drawing ----------
+  function fitCanvas(c) {
+    const dpr = window.devicePixelRatio || 1, w = c.clientWidth, h = c.clientHeight;
+    const W = Math.round(w * dpr), H = Math.round(h * dpr);
+    if (c.width !== W || c.height !== H) { c.width = W; c.height = H; }
+    const ctx = c.getContext('2d'); ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.clearRect(0, 0, w, h);
+    return [ctx, w, h];
+  }
+  function line(ctx, x1, y1, x2, y2) { ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke(); }
+  function empty(ctx, w, h, msg) { ctx.fillStyle = C.muted; ctx.font = '14px "Avenir Next", "Segoe UI", Roboto, system-ui, sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(msg, w / 2, h / 2); }
+  function drawLive() {
+    const [ctx, w, h] = fitCanvas(ui.live);
+    const padL = 40, padR = 12, padT = 28, padB = 20, pw = w - padL - padR, ph = h - padT - padB, mid = padT + ph / 2;
+    const now = lastT || 0, xOf = t => padL + pw * (1 - Math.min(1, Math.max(0, (now - t) / 5)));
+    ctx.strokeStyle = C.grid; ctx.lineWidth = 1;
+    for (let s = 0; s <= 5; s++) line(ctx, padL + pw * s / 5, padT, padL + pw * s / 5, padT + ph);
+    ctx.strokeStyle = C.rule; line(ctx, padL, mid, padL + pw, mid);
+    const seg = buf.filter(x => x[0] > now - 5);
+    if (seg.length < 5) { empty(ctx, w, h, running ? 'Waiting for motion' : 'Tap Start'); return; }
+    let m = 0; for (const x of seg) m = Math.max(m, Math.abs(x[5]));
+    yLive = Math.max(yLive * 0.98, m * 1.1, 0.3);
+    ctx.fillStyle = C.muted; ctx.font = FONT; ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
+    ctx.fillText('+' + yLive.toFixed(1), padL - 6, padT); ctx.fillText('-' + yLive.toFixed(1), padL - 6, padT + ph);
+    ctx.strokeStyle = C.ink; ctx.lineWidth = 1.5; ctx.lineJoin = 'round'; ctx.beginPath();
+    seg.forEach((x, i) => { const px = xOf(x[0]), py = mid - x[5] / yLive * ph / 2; if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py); });
+    ctx.stroke();
+    ctx.fillStyle = C.mark;
+    for (const st of stepS.times) if (st > now - 5) { ctx.beginPath(); ctx.arc(xOf(st), padT + 8, 3.5, 0, Math.PI * 2); ctx.fill(); }
+  }
+  function drawTemplate(canvas, key, scaleRef, floor, fmt) {
+    const [ctx, w, h] = fitCanvas(canvas);
+    const padL = 40, padR = 12, padT = 28, padB = 20, pw = w - padL - padR, ph = h - padT - padB;
+    ctx.strokeStyle = C.grid; ctx.lineWidth = 1;
+    for (let s = 0; s <= 4; s++) line(ctx, padL + pw * s / 4, padT, padL + pw * s / 4, padT + ph);
+    ctx.fillStyle = C.muted; ctx.font = FONT; ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+    for (let s = 0; s <= 4; s++) ctx.fillText(s * 25 + '%', padL + pw * s / 4, padT + ph + 5);
+    if (!templ || steps.length < 2) { empty(ctx, w, h, running ? 'Walk to build templates' : 'Tap Start'); return scaleRef; }
+    let lo = Infinity, hi = -Infinity;
+    for (const s of steps.slice(-20)) for (const v of s.bins[key]) { lo = Math.min(lo, v); hi = Math.max(hi, v); }
+    const span = Math.max(hi - lo, floor); scaleRef = Math.max(scaleRef * 0.97, span);
+    const mid = (hi + lo) / 2, yOf = v => padT + ph * (0.5 - (v - mid) / scaleRef);
+    ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
+    ctx.fillText(fmt(mid + scaleRef / 2), padL - 6, padT); ctx.fillText(fmt(mid - scaleRef / 2), padL - 6, padT + ph);
+    ctx.lineJoin = 'round'; ctx.globalAlpha = 0.25; ctx.lineWidth = 1;
+    for (const s of steps.slice(-20)) {
+      ctx.strokeStyle = s.foot === 0 ? C.ink : C.mark; ctx.beginPath();
+      for (let i = 0; i < BINS; i++) { const x = padL + pw * (i + 0.5) / BINS, y = yOf(s.bins[key][i]); if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y); }
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1; ctx.lineWidth = 2;
+    for (const f of [0, 1]) {
+      if (count[f] < 1) continue;
+      ctx.strokeStyle = f === 0 ? C.ink : C.mark; ctx.beginPath();
+      for (let i = 0; i < BINS; i++) { const x = padL + pw * (i + 0.5) / BINS, y = yOf(templ[f][key][i]); if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y); }
+      ctx.stroke();
+    }
+    return scaleRef;
+  }
+  function draw() {
+    drawLive();
+    yTplA = drawTemplate(ui.tplA, 'va', yTplA, 1, v => v.toFixed(1));
+    yTplG = drawTemplate(ui.tplG, 'gm', yTplG, 10, v => v.toFixed(0));
+  }
+
+  // ---------- controls ----------
+  async function start() {
+    if (running) { stop(); return; }
+    if (typeof DeviceMotionEvent === 'undefined') { status('This browser does not expose motion sensors.'); return; }
+    if (typeof DeviceMotionEvent.requestPermission === 'function') {
+      try { const r = await DeviceMotionEvent.requestPermission(); if (r !== 'granted') { status('Motion access was refused. Reload and allow it.'); return; } }
+      catch (err) { status('Motion access could not be requested. Open the page over HTTPS.'); return; }
+    }
+    if (!window.isSecureContext) { status('Not on HTTPS, so the browser will not deliver sensor data.'); return; }
+    running = true; calibrating = true; intervals = []; lastT = null; gotEvents = false; grav = null; gravFast = null; prevGyro = null; lfEma = 0;
+    buf.length = 0; kin.length = 0; tiltBuf.length = 0; stepS = { p1: 0, p2: 0, t1: 0, lastT: -10, peakEma: 0, times: [] }; lastStepT = null;
+    window.addEventListener('devicemotion', onMotion);
+    ui.start.textContent = 'Stop'; ui.state.textContent = 'Measuring sample rate'; ui.stateSub.textContent = '';
+    status('Measuring the sample rate.');
+    noEventTimer = setTimeout(() => { if (!gotEvents) status('No motion data is arriving. Check HTTPS and motion access.'); }, 3000);
+    try { if (navigator.wakeLock) wakeLock = await navigator.wakeLock.request('screen'); } catch (err) {}
+  }
+  function stop() {
+    running = false; calibrating = false;
+    window.removeEventListener('devicemotion', onMotion);
+    clearInterval(anaTimer); clearTimeout(noEventTimer);
+    ui.start.textContent = 'Start'; ui.state.textContent = 'Stopped'; ui.banner.style.background = '#5E6B7C';
+    status('Stopped. ' + steps.length + ' steps captured.');
+    if (wakeLock) { wakeLock.release().catch(() => {}); wakeLock = null; }
+    draw();
+  }
+  function reset() {
+    steps = []; templ = null; count = [0, 0]; nextFoot = 0; lastStepT = null; leverCm = null; leverR2 = 0; yTplA = 1; yTplG = 1;
+    ui.csv.disabled = true; ui.reset.disabled = true;
+    for (const k of ['cad', 'reg', 'consist', 'asym', 'impact', 'lever']) ui[k].textContent = '';
+    status('Cleared.'); draw();
+  }
+  function saveCsv() {
+    if (!steps.length) return;
+    const rows = ['step,t_s,foot,dur_s,corr,peak_va,movement,bin,va,ha,gm,tilt'];
+    steps.forEach((s, k) => {
+      for (let i = 0; i < BINS; i++) rows.push([k + 1, s.t.toFixed(3), s.foot === 0 ? 'A' : 'B', s.dur.toFixed(3), s.corr != null ? s.corr.toFixed(3) : '', s.peak.toFixed(3), s.lf.toFixed(3), i,
+        s.bins.va[i].toFixed(4), s.bins.ha[i].toFixed(4), s.bins.gm[i].toFixed(3), s.bins.tilt[i].toFixed(2)].join(','));
+    });
+    rows.push('# lever_cm,' + (leverCm != null ? leverCm.toFixed(2) : '') + ',lever_r2,' + leverR2.toFixed(3) + ',fs,' + fs);
+    const blob = new Blob([rows.join('\n')], { type: 'text/csv' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob); a.download = 'gait_v' + VERSION + '_' + steps.length + 'steps.csv';
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+  }
+  ui.start.addEventListener('click', start);
+  ui.reset.addEventListener('click', reset);
+  ui.csv.addEventListener('click', saveCsv);
+  window.addEventListener('resize', draw);
+  ui.ver.textContent = 'v' + VERSION;
+  draw();
+})();
+</script>
+</body>
+</html>
