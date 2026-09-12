@@ -1,0 +1,497 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#EEF1F4">
+<title>Tremor band, 4 to 12 Hz</title>
+<style>
+  :root {
+    --paper: #EEF1F4;
+    --panel: #F8FAFC;
+    --grid: #DAE1E8;
+    --rule: #B6C1CE;
+    --ink: #14213D;
+    --ink-2: #2F6B9A;
+    --ink-3: #8DA6BF;
+    --band: #F2C56B;
+    --mark: #C8462B;
+    --muted: #5E6B7C;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: "Avenir Next", "Segoe UI", Roboto, system-ui, -apple-system, sans-serif;
+    font-size: 16px;
+    line-height: 1.4;
+    padding: calc(env(safe-area-inset-top) + 18px) 16px calc(env(safe-area-inset-bottom) + 16px);
+    -webkit-text-size-adjust: 100%;
+    overscroll-behavior: none;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+  h1 { font-size: 22px; font-weight: 600; letter-spacing: -0.01em; }
+  .sub { color: var(--muted); font-size: 14px; margin-top: -8px; }
+  .row { display: flex; gap: 10px; align-items: stretch; }
+  button { font: inherit; border: 0; border-radius: 6px; cursor: pointer; -webkit-tap-highlight-color: transparent; touch-action: manipulation; }
+  button:focus-visible { outline: 2px solid var(--ink-2); outline-offset: 2px; }
+  .primary { flex: 1; background: var(--ink); color: #fff; font-size: 17px; font-weight: 600; padding: 14px 18px; }
+  .secondary { background: transparent; color: var(--ink); border: 1.5px solid var(--rule); padding: 12px 16px; font-size: 15px; }
+  .secondary:disabled { opacity: 0.4; cursor: default; }
+  .seg { display: inline-flex; border: 1.5px solid var(--rule); border-radius: 6px; overflow: hidden; }
+  .seg button { background: transparent; color: var(--muted); padding: 0 14px; font-size: 14px; border-radius: 0; }
+  .seg button[aria-pressed="true"] { background: var(--ink); color: #fff; }
+  .readings { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+  .reading { border-top: 2px solid var(--ink); padding-top: 6px; }
+  .reading b { display: block; font-size: 24px; font-weight: 600; font-variant-numeric: tabular-nums; line-height: 1.1; min-height: 1.1em; }
+  .reading small { display: block; color: var(--muted); font-size: 12px; margin-top: 2px; }
+  figure { position: relative; }
+  figure canvas { display: block; width: 100%; background: var(--panel); border: 1.5px solid var(--rule); border-radius: 4px; }
+  figcaption { position: absolute; top: 8px; left: 12px; right: 12px; font-size: 12px; color: var(--muted); pointer-events: none; display: flex; gap: 8px; align-items: center; }
+  .sw { display: inline-block; width: 14px; height: 3px; border-radius: 2px; flex: none; }
+  #trace { height: 36vh; min-height: 200px; }
+  #spec { height: 26vh; min-height: 150px; }
+  .status { font-size: 14px; color: var(--muted); min-height: 1.4em; }
+  .note { font-size: 12px; color: var(--muted); }
+</style>
+</head>
+<body>
+<h1>Tremor band, 4 to 12 Hz</h1>
+<p class="sub">Hold the phone in one hand with your arm relaxed, then tap Start.</p>
+
+<div class="row">
+  <button class="primary" id="startBtn">Start</button>
+  <div class="seg" role="group" aria-label="Sensor">
+    <button id="gyroBtn" aria-pressed="true">Gyro</button>
+    <button id="accelBtn" aria-pressed="false">Accel</button>
+  </div>
+</div>
+
+<div class="readings">
+  <div class="reading"><b id="peak"></b><small>peak, Hz</small></div>
+  <div class="reading"><b id="rms"></b><small id="rmsLabel">band RMS, deg/s</small></div>
+  <div class="reading"><b id="share"></b><small>in band, %</small></div>
+  <div class="reading"><b id="rate"></b><small>samples/s</small></div>
+</div>
+
+<figure>
+  <canvas id="trace"></canvas>
+  <figcaption>
+    <span id="traceCap">Filtered 4 to 12 Hz, last 5 s, deg/s</span>
+    <span class="sw" style="background:var(--ink)"></span>
+    <span class="sw" style="background:var(--ink-2)"></span>
+    <span class="sw" style="background:var(--ink-3)"></span>
+  </figcaption>
+</figure>
+<figure>
+  <canvas id="spec"></canvas>
+  <figcaption>Spectrum of the raw signal, last 3 s. Shaded area is 4 to 12 Hz.</figcaption>
+</figure>
+
+<p class="status" id="status"></p>
+<div class="row">
+  <button class="secondary" id="csvBtn" disabled>Save CSV</button>
+</div>
+<p class="note">Browsers deliver motion at about 60 samples a second on both iPhone and Android, which is enough to resolve 12 Hz. The page needs HTTPS. On iPhone, Safari asks for motion access when you tap Start. Save CSV keeps about the first ten minutes of the raw, evenly resampled signal.</p>
+
+<script>
+(() => {
+  const BAND_LO = 4, BAND_HI = 12;
+  const N = 1024;          // ring buffer length in samples
+  const MAX_ROWS = 40000;  // CSV cap
+
+  const $ = id => document.getElementById(id);
+  const ui = {
+    start: $('startBtn'), gyro: $('gyroBtn'), accel: $('accelBtn'),
+    peak: $('peak'), rms: $('rms'), share: $('share'), rate: $('rate'), rmsLabel: $('rmsLabel'),
+    status: $('status'), csv: $('csvBtn'), trace: $('trace'), spec: $('spec'), traceCap: $('traceCap')
+  };
+  const css = name => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  const C = {
+    grid: css('--grid'), rule: css('--rule'), ink: css('--ink'), ink2: css('--ink-2'), ink3: css('--ink-3'),
+    band: css('--band'), mark: css('--mark'), muted: css('--muted')
+  };
+  const FONT = '11px "Avenir Next", "Segoe UI", Roboto, system-ui, sans-serif';
+
+  let fs = 60, NFFT = 256, sensor = 'gyro';
+  let running = false, calibrating = false, gotEvents = false, missing = 0;
+  let intervals = [], lastRaw = null, gridT = null, t0 = null;
+  const raw = [0, 1, 2].map(() => new Float32Array(N));
+  const filt = [0, 1, 2].map(() => new Float32Array(N));
+  let head = 0, count = 0, chains = null, psdS = null, yScale = 0, rows = [];
+  let stats = { peak: null, rms: 0, share: 0 };
+  let rafId = null, anaTimer = null, noEventTimer = null, wakeLock = null, lastDraw = 0;
+
+  const unit = () => sensor === 'gyro' ? 'deg/s' : 'm/s²';
+  const floorScale = () => sensor === 'gyro' ? 1.5 : 0.03;
+  const status = msg => { ui.status.textContent = msg; };
+
+  // ---------- filtering: 4th-order Butterworth high-pass at 4 Hz, then low-pass at 12 Hz ----------
+  class Biquad {
+    constructor(b0, b1, b2, a1, a2) { this.b0 = b0; this.b1 = b1; this.b2 = b2; this.a1 = a1; this.a2 = a2; this.z1 = 0; this.z2 = 0; }
+    run(x) {
+      const y = this.b0 * x + this.z1;
+      this.z1 = this.b1 * x - this.a1 * y + this.z2;
+      this.z2 = this.b2 * x - this.a2 * y;
+      return y;
+    }
+  }
+  function biquad(type, f0, rate, Q) {
+    const w = 2 * Math.PI * f0 / rate, c = Math.cos(w), a = Math.sin(w) / (2 * Q);
+    const a0 = 1 + a, a1 = -2 * c, a2 = 1 - a;
+    let b0, b1, b2;
+    if (type === 'lp') { b0 = (1 - c) / 2; b1 = 1 - c; b2 = (1 - c) / 2; }
+    else { b0 = (1 + c) / 2; b1 = -(1 + c); b2 = (1 + c) / 2; }
+    return new Biquad(b0 / a0, b1 / a0, b2 / a0, a1 / a0, a2 / a0);
+  }
+  function makeChain() {
+    const Q1 = 0.5412, Q2 = 1.3066; // Butterworth section Q values for a 4th-order response
+    return [biquad('hp', BAND_LO, fs, Q1), biquad('hp', BAND_LO, fs, Q2), biquad('lp', BAND_HI, fs, Q1), biquad('lp', BAND_HI, fs, Q2)];
+  }
+  function resetBuffers() {
+    head = 0; count = 0; psdS = null; yScale = 0; rows = []; lastRaw = null; gridT = null; t0 = null;
+    chains = [makeChain(), makeChain(), makeChain()];
+    stats = { peak: null, rms: 0, share: 0 };
+  }
+
+  // ---------- sensor input, resampled onto a uniform grid ----------
+  function readSample(e) {
+    const r = e.rotationRate, a = e.acceleration;
+    if (sensor === 'gyro') return (r && r.alpha != null) ? [r.alpha, r.beta, r.gamma] : null;
+    return (a && a.x != null) ? [a.x, a.y, a.z] : null;
+  }
+  function onMotion(e) {
+    const v = readSample(e);
+    if (!v) {
+      missing++;
+      if (missing > 20 && sensor === 'gyro' && e.acceleration && e.acceleration.x != null) {
+        setSensor('accel');
+        status('No gyroscope on this device, so using the accelerometer instead.');
+      }
+      return;
+    }
+    gotEvents = true;
+    const t = ((e.timeStamp && e.timeStamp < 1e12) ? e.timeStamp : performance.now()) / 1000;
+
+    if (calibrating) {
+      if (lastRaw) intervals.push(t - lastRaw.t);
+      lastRaw = { t, v };
+      if (intervals.length >= 90) finishCalibration();
+      return;
+    }
+    if (!lastRaw || t - lastRaw.t > 0.5) { lastRaw = { t, v }; gridT = t; return; }
+    if (t <= lastRaw.t) { lastRaw = { t, v }; return; }
+
+    const dt = 1 / fs;
+    while (gridT <= t) {
+      const a = (gridT - lastRaw.t) / (t - lastRaw.t);
+      for (let i = 0; i < 3; i++) {
+        const x = lastRaw.v[i] + a * (v[i] - lastRaw.v[i]);
+        raw[i][head] = x;
+        let y = x;
+        for (const b of chains[i]) y = b.run(y);
+        filt[i][head] = y;
+      }
+      if (t0 === null) t0 = gridT;
+      if (rows.length < MAX_ROWS) {
+        rows.push([(gridT - t0).toFixed(4), raw[0][head].toFixed(4), raw[1][head].toFixed(4), raw[2][head].toFixed(4)]);
+      }
+      head = (head + 1) % N; count++; gridT += dt;
+    }
+    lastRaw = { t, v };
+  }
+  function finishCalibration() {
+    intervals.sort((a, b) => a - b);
+    const med = intervals[Math.floor(intervals.length / 2)];
+    let est = med > 0 ? 1 / med : 60;
+    if (!isFinite(est)) est = 60;
+    fs = Math.round(Math.min(400, Math.max(20, est)));
+    NFFT = fs > 85 ? 512 : 256;
+    calibrating = false;
+    resetBuffers();
+    ui.rate.textContent = fs;
+    status('Live. Keep still for a few seconds and watch the trace settle.');
+    anaTimer = setInterval(analyse, 250);
+  }
+
+  // ---------- spectrum and readings ----------
+  function fft(re, im) {
+    const n = re.length;
+    for (let i = 1, j = 0; i < n; i++) {
+      let bit = n >> 1;
+      for (; j & bit; bit >>= 1) j ^= bit;
+      j ^= bit;
+      if (i < j) {
+        let tmp = re[i]; re[i] = re[j]; re[j] = tmp;
+        tmp = im[i]; im[i] = im[j]; im[j] = tmp;
+      }
+    }
+    for (let len = 2; len <= n; len <<= 1) {
+      const ang = -2 * Math.PI / len, wr = Math.cos(ang), wi = Math.sin(ang), half = len >> 1;
+      for (let i = 0; i < n; i += len) {
+        let cr = 1, ci = 0;
+        for (let j = 0; j < half; j++) {
+          const p = i + j, q = p + half;
+          const ur = re[p], ui = im[p];
+          const vr = re[q] * cr - im[q] * ci, vi = re[q] * ci + im[q] * cr;
+          re[p] = ur + vr; im[p] = ui + vi;
+          re[q] = ur - vr; im[q] = ui - vi;
+          const ncr = cr * wr - ci * wi; ci = cr * wi + ci * wr; cr = ncr;
+        }
+      }
+    }
+  }
+  function analyse() {
+    const L = Math.min(count, Math.round(3 * fs), NFFT);
+    if (L < fs) return;
+    const base = (head - L + N) % N;
+    const psd = new Float64Array(NFFT / 2);
+    const re = new Float64Array(NFFT), im = new Float64Array(NFFT);
+    for (let ax = 0; ax < 3; ax++) {
+      re.fill(0); im.fill(0);
+      let mean = 0;
+      for (let k = 0; k < L; k++) mean += raw[ax][(base + k) % N];
+      mean /= L;
+      for (let k = 0; k < L; k++) {
+        const w = 0.5 - 0.5 * Math.cos(2 * Math.PI * k / (L - 1));
+        re[k] = (raw[ax][(base + k) % N] - mean) * w;
+      }
+      fft(re, im);
+      for (let b = 0; b < psd.length; b++) psd[b] += re[b] * re[b] + im[b] * im[b];
+    }
+    if (!psdS || psdS.length !== psd.length) psdS = psd;
+    else for (let b = 0; b < psd.length; b++) psdS[b] = 0.6 * psdS[b] + 0.4 * psd[b];
+
+    const df = fs / NFFT;
+    let pb = -1, pv = 0, bandP = 0, totP = 0;
+    for (let b = 1; b < psdS.length; b++) {
+      const f = b * df;
+      if (f >= 0.5) totP += psdS[b];
+      if (f >= BAND_LO && f <= BAND_HI) {
+        bandP += psdS[b];
+        if (psdS[b] > pv) { pv = psdS[b]; pb = b; }
+      }
+    }
+    let peak = null;
+    if (pb > 0 && pb < psdS.length - 1) {
+      const y0 = Math.log(psdS[pb - 1] + 1e-12), y1 = Math.log(psdS[pb] + 1e-12), y2 = Math.log(psdS[pb + 1] + 1e-12);
+      const den = y0 - 2 * y1 + y2;
+      const d = den !== 0 ? 0.5 * (y0 - y2) / den : 0;
+      peak = (pb + Math.max(-0.5, Math.min(0.5, d))) * df;
+    }
+    let ss = 0;
+    for (let k = 0; k < L; k++) {
+      const j = (base + k) % N;
+      ss += filt[0][j] * filt[0][j] + filt[1][j] * filt[1][j] + filt[2][j] * filt[2][j];
+    }
+    stats = { peak, rms: Math.sqrt(ss / L), share: totP > 0 ? bandP / totP : 0 };
+    ui.peak.textContent = peak != null ? peak.toFixed(1) : '';
+    ui.rms.textContent = stats.rms.toFixed(sensor === 'gyro' ? 2 : 3);
+    ui.share.textContent = Math.round(stats.share * 100);
+  }
+
+  // ---------- drawing ----------
+  function fitCanvas(c) {
+    const dpr = window.devicePixelRatio || 1;
+    const w = c.clientWidth, h = c.clientHeight;
+    const W = Math.round(w * dpr), H = Math.round(h * dpr);
+    if (c.width !== W || c.height !== H) { c.width = W; c.height = H; }
+    const ctx = c.getContext('2d');
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, w, h);
+    return [ctx, w, h];
+  }
+  function line(ctx, x1, y1, x2, y2) { ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke(); }
+  function emptyText(ctx, w, h, msg) {
+    if (!msg) return;
+    ctx.fillStyle = C.muted; ctx.font = '14px "Avenir Next", "Segoe UI", Roboto, system-ui, sans-serif';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(msg, w / 2, h / 2);
+  }
+
+  function drawTrace() {
+    const [ctx, w, h] = fitCanvas(ui.trace);
+    const padL = 46, padR = 12, padT = 30, padB = 24;
+    const pw = w - padL - padR, ph = h - padT - padB, mid = padT + ph / 2;
+
+    ctx.lineWidth = 1;
+    ctx.strokeStyle = C.grid;
+    for (let s = 0; s <= 5; s++) line(ctx, padL + pw * s / 5, padT, padL + pw * s / 5, padT + ph);
+    for (let g = -2; g <= 2; g++) {
+      ctx.strokeStyle = g === 0 ? C.rule : C.grid;
+      line(ctx, padL, mid - g * ph / 4, padL + pw, mid - g * ph / 4);
+    }
+    ctx.fillStyle = C.muted; ctx.font = FONT; ctx.textBaseline = 'top'; ctx.textAlign = 'center';
+    for (let s = 0; s <= 5; s++) ctx.fillText(s === 5 ? 'now' : (s - 5) + ' s', padL + pw * s / 5, padT + ph + 6);
+
+    const span = Math.min(N, Math.round(5 * fs));
+    const L = Math.min(count, span);
+    if (L < 2) { emptyText(ctx, w, h, running ? 'Waiting for motion data' : 'Tap Start'); return; }
+
+    const base = (head - L + N) % N;
+    let m = 0;
+    for (let ax = 0; ax < 3; ax++) for (let k = 0; k < L; k++) {
+      const v = Math.abs(filt[ax][(base + k) % N]);
+      if (v > m) m = v;
+    }
+    yScale = Math.max(yScale * 0.985, m * 1.15, floorScale());
+
+    const fmt = v => sensor === 'gyro' ? v.toFixed(1) : v.toFixed(2);
+    ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
+    ctx.fillText('+' + fmt(yScale), padL - 6, padT);
+    ctx.fillText('0', padL - 6, mid);
+    ctx.fillText('-' + fmt(yScale), padL - 6, padT + ph);
+    ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+    ctx.fillText(unit(), 6, padT + ph + 6);
+
+    const cols = [C.ink, C.ink2, C.ink3];
+    ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+    for (let ax = 2; ax >= 0; ax--) {
+      ctx.strokeStyle = cols[ax]; ctx.lineWidth = ax === 0 ? 1.75 : 1.25;
+      ctx.beginPath();
+      for (let k = 0; k < L; k++) {
+        const x = padL + pw * (span - L + k) / (span - 1);
+        const y = mid - filt[ax][(base + k) % N] / yScale * (ph / 2);
+        if (k === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+      }
+      ctx.stroke();
+    }
+  }
+
+  function drawSpec() {
+    const [ctx, w, h] = fitCanvas(ui.spec);
+    const padL = 46, padR = 12, padT = 30, padB = 24;
+    const pw = w - padL - padR, ph = h - padT - padB;
+    const fmax = Math.min(25, fs / 2), df = fs / NFFT;
+    const xOf = f => padL + pw * f / fmax;
+
+    ctx.fillStyle = C.band; ctx.globalAlpha = 0.35;
+    ctx.fillRect(xOf(BAND_LO), padT, xOf(BAND_HI) - xOf(BAND_LO), ph);
+    ctx.globalAlpha = 1;
+
+    ctx.lineWidth = 1; ctx.strokeStyle = C.grid;
+    ctx.fillStyle = C.muted; ctx.font = FONT; ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+    for (let f = 0; f <= fmax; f += 4) {
+      line(ctx, xOf(f), padT, xOf(f), padT + ph);
+      ctx.fillText(String(f), xOf(f), padT + ph + 6);
+    }
+    ctx.textAlign = 'left'; ctx.fillText('Hz', 6, padT + ph + 6);
+    ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
+    ctx.fillText('0 dB', padL - 6, padT);
+    ctx.fillText('-40', padL - 6, padT + ph);
+    ctx.strokeStyle = C.rule; line(ctx, padL, padT + ph, padL + pw, padT + ph);
+
+    if (!psdS) { emptyText(ctx, w, h, running ? '' : 'Tap Start'); return; }
+    const bMax = Math.floor(fmax / df);
+    let maxV = 0;
+    for (let b = 1; b <= bMax; b++) if (psdS[b] > maxV) maxV = psdS[b];
+    if (!(maxV > 0)) return;
+    const range = 40;
+    const yOf = v => padT + ph * Math.min(1, Math.max(0, -10 * Math.log10(v / maxV + 1e-12) / range));
+
+    ctx.strokeStyle = C.ink; ctx.lineWidth = 1.75; ctx.lineJoin = 'round';
+    ctx.beginPath();
+    for (let b = 1; b <= bMax; b++) {
+      const x = xOf(b * df), y = yOf(psdS[b]);
+      if (b === 1) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+
+    if (stats.peak != null) {
+      const b = Math.max(1, Math.min(bMax, Math.round(stats.peak / df)));
+      const x = xOf(stats.peak), y = yOf(psdS[b]);
+      ctx.fillStyle = C.mark;
+      ctx.beginPath(); ctx.arc(x, y, 4, 0, Math.PI * 2); ctx.fill();
+      ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
+      ctx.fillText(stats.peak.toFixed(1) + ' Hz', x, y - 7);
+    }
+  }
+
+  function loop(ts) {
+    if (!running) return;
+    if (ts - lastDraw > 33) { lastDraw = ts; drawTrace(); drawSpec(); }
+    rafId = requestAnimationFrame(loop);
+  }
+
+  // ---------- controls ----------
+  function setSensor(s) {
+    if (s === sensor) return;
+    sensor = s;
+    ui.gyro.setAttribute('aria-pressed', String(s === 'gyro'));
+    ui.accel.setAttribute('aria-pressed', String(s === 'accel'));
+    ui.rmsLabel.textContent = 'band RMS, ' + unit();
+    ui.traceCap.textContent = 'Filtered 4 to 12 Hz, last 5 s, ' + unit();
+    rows = []; ui.csv.disabled = true;
+    ui.peak.textContent = ''; ui.rms.textContent = ''; ui.share.textContent = '';
+    if (running && !calibrating) resetBuffers();
+    if (!running) { drawTrace(); drawSpec(); }
+  }
+
+  async function start() {
+    if (running) { stop(); return; }
+    if (typeof DeviceMotionEvent === 'undefined') {
+      status('This browser does not expose motion sensors.');
+      return;
+    }
+    if (typeof DeviceMotionEvent.requestPermission === 'function') {
+      try {
+        const r = await DeviceMotionEvent.requestPermission();
+        if (r !== 'granted') { status('Motion access was refused. Reload the page and allow it.'); return; }
+      } catch (err) {
+        status('Motion access could not be requested. Open the page over HTTPS and try again.');
+        return;
+      }
+    }
+    if (!window.isSecureContext) {
+      status('This page is not on HTTPS, so the browser will not deliver sensor data.');
+      return;
+    }
+    running = true; calibrating = true; intervals = []; missing = 0; gotEvents = false;
+    resetBuffers();
+    ui.start.textContent = 'Stop'; ui.csv.disabled = true;
+    ui.peak.textContent = ''; ui.rms.textContent = ''; ui.share.textContent = ''; ui.rate.textContent = '';
+    status('Measuring the sample rate.');
+    window.addEventListener('devicemotion', onMotion);
+    noEventTimer = setTimeout(() => {
+      if (!gotEvents) status('No motion data is arriving. Check the page is on HTTPS and motion access is allowed in the browser settings.');
+    }, 3000);
+    try { if (navigator.wakeLock) wakeLock = await navigator.wakeLock.request('screen'); } catch (err) {}
+    rafId = requestAnimationFrame(loop);
+  }
+
+  function stop() {
+    running = false; calibrating = false;
+    window.removeEventListener('devicemotion', onMotion);
+    clearInterval(anaTimer); clearTimeout(noEventTimer); cancelAnimationFrame(rafId);
+    ui.start.textContent = 'Start';
+    ui.csv.disabled = rows.length === 0;
+    status(rows.length ? 'Stopped. ' + Math.round(rows.length / fs) + ' s recorded.' : 'Stopped.');
+    if (wakeLock) { wakeLock.release().catch(() => {}); wakeLock = null; }
+    drawTrace(); drawSpec();
+  }
+
+  function saveCsv() {
+    if (!rows.length) return;
+    const header = 't_s,' + (sensor === 'gyro' ? 'gx_degs,gy_degs,gz_degs' : 'ax_ms2,ay_ms2,az_ms2') + '\n';
+    const blob = new Blob([header + rows.map(r => r.join(',')).join('\n')], { type: 'text/csv' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'tremor_' + sensor + '_' + fs + 'hz.csv';
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+  }
+
+  ui.start.addEventListener('click', start);
+  ui.gyro.addEventListener('click', () => setSensor('gyro'));
+  ui.accel.addEventListener('click', () => setSensor('accel'));
+  ui.csv.addEventListener('click', saveCsv);
+  window.addEventListener('resize', () => { if (!running) { drawTrace(); drawSpec(); } });
+  drawTrace(); drawSpec();
+})();
+</script>
+</body>
+</html>
