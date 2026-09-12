@@ -82,13 +82,14 @@
 </figure>
 
 <p class="status" id="status"></p>
-<p class="note">Everything is computed in the gravity frame so it doesn't depend on how the phone is held: vertical acceleration along gravity, horizontal acceleration across it, gyro magnitude and screen angle. Each step is resampled to 64 points and assigned to whichever foot template it resembles, so a missed step doesn't swap left and right. Step consistency is the correlation of each step with its foot template; left/right difference is one minus the correlation between the two templates. The lever arm is the distance from the sensor to the point the phone pivots about, fitted from 2 to 6 Hz rotation against acceleration over the last 4 s. Save CSV writes every step window with its features.</p>
+<p class="note">Everything is computed in the gravity frame so it doesn't depend on how the phone is held: vertical acceleration along gravity, horizontal acceleration across it, gyro magnitude and screen angle. Each step is resampled to 64 points and assigned to a foot by the direction of the body's slow side-to-side sway at that moment, which alternates with the stepping foot regardless of how the phone is held. Step consistency is the correlation of each step with its foot template; left/right difference is one minus the correlation between the two templates. The lever arm is the distance from the sensor to the point the phone pivots about, fitted from 2 to 6 Hz rotation against acceleration over the last 4 s. Save CSV writes every step window with its features.</p>
 
 <script>
 (() => {
-  const VERSION = 1;
+  const VERSION = 2;
   const BINS = 64, MAX_STEPS = 400;
   const WALK_MIN_LF = 0.7, STEP_MIN = 0.3, STEP_MAX = 1.6, SWING_TILT = 7, SWING_LF = 2.5;
+  const PEAK_FRAC = 0.4, REFRACT_FRAC = 0.6;      // a step peak must be 40% of recent peaks and at least 60% of a step interval after the last
 
   const $ = id => document.getElementById(id);
   const ui = { start: $('startBtn'), reset: $('resetBtn'), csv: $('csvBtn'), banner: $('banner'), state: $('state'), stateSub: $('stateSub'),
@@ -144,7 +145,11 @@
     tiltBuf.push([t, tilt]); while (tiltBuf.length && tiltBuf[0][0] < t - 3) tiltBuf.shift();
     const lfv = runN(F.lf, la); lfEma += (lfv[0] * lfv[0] + lfv[1] * lfv[1] + lfv[2] * lfv[2] - lfEma) / fs;
     let vbp = va; for (const b of F.step) vbp = b.run(vbp);
-    buf.push([t, va, ha, gm, tilt, vbp]); while (buf.length && buf[0][0] < t - 6) buf.shift();
+    // lateral sway: the phone's x axis projected onto the horizontal plane; its slow sign alternates with the stepping foot
+    const xh = [1 - gu[0] * gu[0], -gu[0] * gu[1], -gu[0] * gu[2]], xn = Math.hypot(xh[0], xh[1], xh[2]) || 1;
+    let lat = (la[0] * xh[0] + la[1] * xh[1] + la[2] * xh[2]) / xn;
+    for (const b of F.lat) lat = b.run(lat);
+    buf.push([t, va, ha, gm, tilt, vbp, lat]); while (buf.length && buf[0][0] < t - 6) buf.shift();
     // angular acceleration and linear acceleration, band-passed 2 to 6 Hz, for the lever-arm fit
     const w = gyr.map(v => v * Math.PI / 180);
     if (prevGyro) {
@@ -153,8 +158,10 @@
     }
     prevGyro = w;
     // step detection on the band-passed vertical acceleration
-    const lf = Math.sqrt(lfEma), thresh = Math.max(0.25, 0.3 * stepS.peakEma);
-    if (stepS.p1 > stepS.p2 && stepS.p1 >= vbp && stepS.p1 > thresh && (stepS.t1 - stepS.lastT) > 0.25 && lf > WALK_MIN_LF) {
+    const lf = Math.sqrt(lfEma), thresh = Math.max(0.25, PEAK_FRAC * stepS.peakEma);
+    const recent = stepS.times.slice(-6); let gap = 0.3;
+    if (recent.length >= 3) { const iv = []; for (let i = 1; i < recent.length; i++) iv.push(recent[i] - recent[i - 1]); iv.sort((p, q) => p - q); gap = Math.max(0.3, REFRACT_FRAC * iv[Math.floor(iv.length / 2)]); }
+    if (stepS.p1 > stepS.p2 && stepS.p1 >= vbp && stepS.p1 > thresh && (stepS.t1 - stepS.lastT) > gap && lf > WALK_MIN_LF) {
       stepS.peakEma = stepS.peakEma > 0 ? 0.8 * stepS.peakEma + 0.2 * stepS.p1 : stepS.p1;
       stepS.lastT = stepS.t1;
       onStep(stepS.t1, lf);
@@ -165,7 +172,7 @@
     intervals.sort((x, y) => x - y);
     const med = intervals[Math.floor(intervals.length / 2)];
     fs = Math.round(Math.min(400, Math.max(20, med > 0 ? 1 / med : 60)));
-    F = { lf: chainN(3, 0.3, 4, fs), step: [biquad('hp', 0.5, fs, 0.7071), biquad('lp', 3, fs, 0.7071)], alpha: chainN(3, 2, 6, fs), acc: chainN(3, 2, 6, fs) };
+    F = { lf: chainN(3, 0.3, 4, fs), step: [biquad('hp', 0.5, fs, 0.7071), biquad('lp', 3, fs, 0.7071)], lat: [biquad('hp', 0.4, fs, 0.7071), biquad('lp', 1.3, fs, 0.7071)], alpha: chainN(3, 2, 6, fs), acc: chainN(3, 2, 6, fs) };
     calibrating = false; lastT = null;
     status('Live at ' + fs + ' samples/s. Start walking.');
     anaTimer = setInterval(analyse, 250);
@@ -200,9 +207,10 @@
         if (seg.length >= 6) {
           const bins = segToBins(seg, lastStepT, dur);
           if (!templ) templ = newTempl();
-          let foot;
-          if (count[0] >= 2 && count[1] >= 2) foot = dist(bins, templ[0]) <= dist(bins, templ[1]) ? 0 : 1;
-          else foot = nextFoot;
+          // foot from the lateral sway sign around the step; fall back to alternation when the sway is too small to read
+          const around = seg.filter(x => x[0] >= ts - 0.08 && x[0] <= ts + 0.08);
+          const latMean = around.length ? around.reduce((s_, x) => s_ + x[6], 0) / around.length : 0;
+          let foot = Math.abs(latMean) > 0.04 ? (latMean > 0 ? 0 : 1) : nextFoot;
           const c = count[foot] >= 1 ? corr(bins.va, templ[foot].va) : null;
           const n = count[foot], al = n < 8 ? 1 / (n + 1) : 0.1;
           for (const k of ['va', 'ha', 'gm', 'tilt']) for (let i = 0; i < BINS; i++) templ[foot][k][i] += al * (bins[k][i] - templ[foot][k][i]);
