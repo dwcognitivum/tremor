@@ -78,24 +78,23 @@
 <div class="labels" id="labels"></div>
 
 <p class="status" id="status"></p>
-<p class="note">Detection is rule based, from six indicators: low-frequency movement, screen angle from gravity, slow sway of the screen angle, step rhythm, the ratio of rotation to linear vibration in the 4 to 12 Hz band, and gyro power in that band. Thresholds are constants at the top of the script and are first guesses; the logged CSV (four rows a second, indicators plus detected and labelled context) is what tunes them or trains a classifier. Seated versus standing is the least certain call and is marked as a guess. Lying on your back is read from a flat screen facing downward while in hand; lying on your side is not detectable this way and will read as seated.</p>
+<p class="note">Detection is rule based, from six indicators: low-frequency movement, screen angle from gravity, slow sway of the screen angle, step rhythm, the ratio of rotation to linear vibration in the 4 to 12 Hz band, and gyro power in that band. Thresholds are constants at the top of the script and are first guesses; the logged CSV (four rows a second, indicators plus detected and labelled context) is what tunes them or trains a classifier. Seated and standing are not separated: a first labelled run showed the same sway for both. Lying on your back is read from a flat screen facing downward while in hand; lying on your side is not detectable this way and will read as seated.</p>
 
 <script>
 (() => {
-  const VERSION = 2;
+  const VERSION = 4;
   const IOS = /iP(hone|ad|od)/.test(navigator.userAgent);   // iOS reports gravity with the opposite sign to the spec
   // thresholds (first guesses; tune from logged data)
   const SURFACE_LF = 0.04, SURFACE_TREMOR = 0.2;   // on a surface: almost no movement and no tremor on the gyro
-  const MOVING_LF = 0.25;                            // hand or body moving
+  const MOVING_LF = 0.6;                             // hand or body moving (standing still with phone in hand reaches ~0.5 in logged data)
   const VEHICLE_LF = 0.10, VEHICLE_RATIO = 9;        // sustained vibration without steps, linear rather than rotational
-  const STAND_SWAY = 0.6;                            // degrees RMS of slow screen-angle sway
-  const FLAT_ANGLE = 25;                             // screen within this many degrees of horizontal
-  const SWING_TILT = 12;                             // screen-angle swing over a stride, degrees RMS
+  const SWING_LF = 2.5;                              // movement level only a swinging arm reaches
+  const FLAT_ANGLE = 18;                             // screen within this many degrees of horizontal (a seated reading angle can be as low as 25)
+  const SWING_TILT = 7;                              // screen-angle swing over a stride, degrees RMS
 
   const CONTEXTS = [
     ['surface', 'On a surface', '#8DA6BF'],
-    ['seated', 'In hand, seated', '#2E8B57'],
-    ['standing', 'In hand, standing', '#3AA76D'],
+    ['still', 'In hand, still', '#2E8B57'],
     ['flat', 'Held flat, face up', '#5E9CA8'],
     ['lying', 'Lying on back', '#3F7F8C'],
     ['moving', 'Hand moving', '#C9821A'],
@@ -218,23 +217,26 @@
     }
     // cadence from the last steps, only if recent and regular
     let cadence = 0, regular = false;
-    const st = stepS.times.filter(x => x > now - 4);
+    const st = stepS.times.filter(x => x > now - 5);
     if (st.length >= 3) {
       const iv = []; for (let i = 1; i < st.length; i++) iv.push(st[i] - st[i - 1]);
-      const m = iv.reduce((s, x) => s + x, 0) / iv.length;
-      const cv = Math.sqrt(iv.reduce((s, x) => s + (x - m) * (x - m), 0) / iv.length) / m;
-      if (m >= 0.3 && m <= 1.0 && cv < 0.35) { cadence = 1 / m; regular = true; }
+      const sorted = iv.slice().sort((p, q) => p - q), med = sorted[Math.floor(sorted.length / 2)];
+      const agree = iv.filter(x => Math.abs(x - med) < 0.3 * med).length;
+      if (med >= 0.3 && med <= 1.6 && agree >= Math.max(2, Math.ceil(0.6 * iv.length))) {
+        cadence = med <= 1.05 ? 1 / med : 2 / med;   // one peak per stride when the arm swings
+        regular = true;
+      }
     }
     return { lf, tremG, tremA, ratio, tilt, sway, swing, cadence, regular, faceDown };
   }
   function classify(x) {
     if (x.lf < SURFACE_LF && x.tremG < SURFACE_TREMOR) return ['surface', 'no movement, no tremor'];
-    if (x.regular) return x.swing > SWING_TILT ? ['walk_swing', 'steps at ' + x.cadence.toFixed(1) + '/s, screen angle swinging'] : ['walk_held', 'steps at ' + x.cadence.toFixed(1) + '/s, screen steady'];
+    if (x.regular) return (x.swing > SWING_TILT || x.lf > SWING_LF) ? ['walk_swing', 'steps at ' + x.cadence.toFixed(1) + '/s, arm swinging'] : ['walk_held', 'steps at ' + x.cadence.toFixed(1) + '/s, screen steady'];
+    if (x.lf > SWING_LF && x.swing > 5) return ['walk_swing', 'large rhythmic movement, arm swinging'];
     if (x.lf > VEHICLE_LF && x.ratio < VEHICLE_RATIO && x.ratio > 0) return ['vehicle', 'sustained vibration, mostly linear, no steps'];
     if (x.lf > MOVING_LF) return ['moving', 'movement above ' + MOVING_LF + ' m/s²'];
     if (x.tilt < FLAT_ANGLE) return x.faceDown ? ['lying', 'screen flat and facing down, in hand'] : ['flat', 'screen within ' + FLAT_ANGLE + '° of horizontal, face up'];
-    if (x.sway > STAND_SWAY) return ['standing', 'slow sway ' + x.sway.toFixed(1) + '° (guess)'];
-    return ['seated', 'still, little sway (guess)'];
+    return ['still', 'in hand, little movement'];
   }
   function analyse() {
     if (!F) return;
