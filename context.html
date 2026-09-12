@@ -82,13 +82,15 @@
 
 <script>
 (() => {
-  const VERSION = 5;
+  const VERSION = 6;
   const IOS = /iP(hone|ad|od)/.test(navigator.userAgent);   // iOS reports gravity with the opposite sign to the spec
   // thresholds (first guesses; tune from logged data)
   const SURFACE_LF = 0.04, SURFACE_TREMOR = 0.2;   // on a surface: almost no movement and no tremor on the gyro
   const MOVING_LF = 0.6;                             // hand or body moving (standing still with phone in hand reaches ~0.5 in logged data)
   const VEHICLE_LF = 0.10, VEHICLE_RATIO = 9;        // sustained vibration without steps, linear rather than rotational
   const SWING_LF = 2.5;                              // movement level only a swinging arm reaches
+  const WALK_MIN_LF = 0.7, WALK_HOLD = 2;            // steps only count with real movement; walking persists 2 s after the last lock
+  const MOVING_GYRO = 6;                             // moving if movement is modest but the gyro band is busy
   const FLAT_ANGLE = 18;                             // screen within this many degrees of horizontal (a seated reading angle can be as low as 25)
   const SWING_TILT = 7;                              // screen-angle swing over a stride, degrees RMS
 
@@ -137,7 +139,7 @@
   let grav = null, gravFast = null;   // slow and fast low-passed gravity vectors
   const tiltBuf = [];                 // [t, tilt] last 5 s for sway and swing
   let stepS = { p1: 0, p2: 0, t1: 0, lastT: -10, peakEma: 0, times: [] };
-  let label = '', current = null, currentSub = '', faceDown = false;
+  let label = '', current = null, currentSub = '', faceDown = false, lastWalkT = -10, lastSwingT = -10, lastCadence = 0;
   const history = [];                 // [t, detected, label] every 250 ms
   const log = [];                     // CSV rows
   const MAX_LOG = 20000;
@@ -223,19 +225,23 @@
       const iv = []; for (let i = 1; i < st.length; i++) iv.push(st[i] - st[i - 1]);
       const sorted = iv.slice().sort((p, q) => p - q), med = sorted[Math.floor(sorted.length / 2)];
       const agree = iv.filter(x => Math.abs(x - med) < 0.3 * med).length;
-      if (med >= 0.3 && med <= 1.6 && agree >= Math.max(2, Math.ceil(0.6 * iv.length))) {
+      if (med >= 0.3 && med <= 1.6 && agree >= Math.max(2, Math.ceil(0.6 * iv.length)) && lf > WALK_MIN_LF) {
         cadence = med <= 1.05 ? 1 / med : 2 / med;   // one peak per stride when the arm swings
         regular = true;
       }
     }
-    return { lf, tremG, tremA, ratio, tilt, sway, swing, cadence, regular, faceDown };
+    if (regular) { lastWalkT = now; lastCadence = cadence; if (swing > SWING_TILT || lf > SWING_LF) lastSwingT = now; }
+    const walking = now - lastWalkT < WALK_HOLD, swinging = walking && now - lastSwingT < WALK_HOLD;
+    if (walking && !regular) cadence = lastCadence;
+    return { lf, tremG, tremA, ratio, tilt, sway, swing, cadence, regular, faceDown, walking, swinging };
   }
   function classify(x) {
     if (x.lf < SURFACE_LF && x.tremG < SURFACE_TREMOR) return ['surface', 'no movement, no tremor'];
-    if (x.regular) return (x.swing > SWING_TILT || x.lf > SWING_LF) ? ['walk_swing', 'steps at ' + x.cadence.toFixed(1) + '/s, arm swinging'] : ['walk_held', 'steps at ' + x.cadence.toFixed(1) + '/s, screen steady'];
+    if (x.walking) return x.swinging ? ['walk_swing', 'steps at ' + x.cadence.toFixed(1) + '/s, arm swinging'] : ['walk_held', 'steps at ' + x.cadence.toFixed(1) + '/s, screen steady'];
     if (x.lf > SWING_LF && x.swing > 5) return ['walk_swing', 'large rhythmic movement, arm swinging'];
     if (x.lf > VEHICLE_LF && x.ratio < VEHICLE_RATIO && x.ratio > 0) return ['vehicle', 'sustained vibration, mostly linear, no steps'];
     if (x.lf > MOVING_LF) return ['moving', 'movement above ' + MOVING_LF + ' m/s²'];
+    if (x.lf > 0.25 && x.tremG > MOVING_GYRO) return ['moving', 'hand turning, gyro band busy'];
     if (x.tilt < FLAT_ANGLE) return x.faceDown ? ['lying', 'screen flat and facing down, in hand'] : ['flat', 'screen within ' + FLAT_ANGLE + '° of horizontal, face up'];
     return ['still', 'in hand, little movement'];
   }
@@ -297,7 +303,7 @@
     if (!window.isSecureContext) { status('Not on HTTPS, so the browser will not deliver sensor data.'); return; }
     running = true; calibrating = true; intervals = []; lastT = null; gotEvents = false; grav = null; gravFast = null; tiltBuf.length = 0;
     ema = { lf: 0, g412: 0, a412: 0, sway: 0 }; stepS = { p1: 0, p2: 0, t1: 0, lastT: -10, peakEma: 0, times: [] };
-    history.length = 0; log.length = 0;
+    history.length = 0; log.length = 0; lastWalkT = -10; lastSwingT = -10; lastCadence = 0;
     window.addEventListener('devicemotion', onMotion);
     ui.start.textContent = 'Stop'; ui.ctx.textContent = 'Measuring sample rate'; ui.ctxSub.textContent = ''; ui.banner.style.background = '#5E6B7C';
     status('Measuring the sample rate.');
