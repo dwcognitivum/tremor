@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#EEF1F4">
+<title>Gesture coupling</title>
+<style>
+  :root {
+    --paper: #EEF1F4; --panel: #F8FAFC; --grid: #DAE1E8; --rule: #B6C1CE;
+    --ink: #14213D; --ink-2: #2F6B9A; --ink-3: #8DA6BF; --band: #F2C56B; --mark: #C8462B; --muted: #5E6B7C;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body {
+    background: var(--paper); color: var(--ink);
+    font-family: "Avenir Next", "Segoe UI", Roboto, system-ui, -apple-system, sans-serif;
+    font-size: 16px; line-height: 1.4;
+    padding: calc(env(safe-area-inset-top) + 18px) 16px calc(env(safe-area-inset-bottom) + 16px);
+    -webkit-text-size-adjust: 100%; overscroll-behavior: none;
+    display: flex; flex-direction: column; gap: 14px;
+  }
+  h1 { font-size: 22px; font-weight: 600; letter-spacing: -0.01em; display: flex; align-items: baseline; gap: 10px; }
+  .ver { font-size: 13px; font-weight: 500; color: var(--muted); }
+  .sub { color: var(--muted); font-size: 14px; margin-top: -8px; }
+  .row { display: flex; gap: 10px; align-items: stretch; }
+  button { font: inherit; border: 0; border-radius: 6px; cursor: pointer; -webkit-tap-highlight-color: transparent; touch-action: manipulation; }
+  button:focus-visible { outline: 2px solid var(--ink-2); outline-offset: 2px; }
+  .primary { flex: 1; background: var(--ink); color: #fff; font-size: 17px; font-weight: 600; padding: 14px 18px; }
+  .secondary { background: transparent; color: var(--ink); border: 1.5px solid var(--rule); padding: 12px 14px; font-size: 15px; }
+  .secondary:disabled { opacity: 0.4; cursor: default; }
+  .readings { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+  .reading { border-top: 2px solid var(--ink); padding-top: 6px; }
+  .reading b { display: block; font-size: 19px; font-weight: 600; font-variant-numeric: tabular-nums; line-height: 1.1; min-height: 1.1em; }
+  .reading small { display: block; color: var(--muted); font-size: 12px; margin-top: 2px; }
+  figure { position: relative; }
+  figure canvas { display: block; width: 100%; background: var(--panel); border: 1.5px solid var(--rule); border-radius: 4px; }
+  figcaption { position: absolute; top: 8px; left: 12px; right: 12px; font-size: 12px; color: var(--muted); pointer-events: none; }
+  #pad { height: 34vh; min-height: 220px; touch-action: none; background: var(--ink); border-color: var(--ink); }
+  #pad.idle { background: #B6C1CE; border-color: #B6C1CE; }
+  #timing { height: 20vh; min-height: 130px; }
+  .status { font-size: 14px; color: var(--muted); min-height: 1.4em; }
+  .note { font-size: 12px; color: var(--muted); }
+</style>
+</head>
+<body>
+<h1>Gesture coupling <span class="ver" id="ver"></span></h1>
+<p class="sub">Hold the phone as you normally do. Tap Start, then swipe left and right or scroll up and down on the dark pad with your thumb, one stroke at a time. Repeat each direction ten or more times.</p>
+
+<div class="row">
+  <button class="primary" id="startBtn">Start</button>
+  <button class="secondary" id="resetBtn" disabled>Reset</button>
+  <button class="secondary" id="csvBtn" disabled>Save CSV</button>
+</div>
+
+<div class="readings">
+  <div class="reading"><b id="last"></b><small>last gesture</small></div>
+  <div class="reading"><b id="lag"></b><small>rotation lag, ms</small></div>
+  <div class="reading"><b id="coupled"></b><small>coupled rotation, ° per 100 px</small></div>
+  <div class="reading"><b id="twist"></b><small>twist, ° per 100 px</small></div>
+  <div class="reading"><b id="pre"></b><small>rotation before touch, °</small></div>
+  <div class="reading"><b id="release"></b><small>rotation after release, °</small></div>
+  <div class="reading"><b id="speed"></b><small>peak speed, px/s</small></div>
+  <div class="reading"><b id="consist"></b><small>consistency, this direction</small></div>
+  <div class="reading"><b id="counts"></b><small>strokes L/R/U/D</small></div>
+</div>
+
+<figure>
+  <canvas id="pad" class="idle"></canvas>
+  <figcaption style="color:#fff;opacity:.85" id="padCap">Swipe or scroll here. Stroke width shows how fast the phone was rotating at that point; colour shows which way.</figcaption>
+</figure>
+<figure>
+  <canvas id="timing"></canvas>
+  <figcaption>Last gesture: finger speed (dark) against phone rotation rate (red). Dashed lines are touch-down and lift-off.</figcaption>
+</figure>
+
+<p class="status" id="status"></p>
+<p class="note">Each stroke is recorded with the gyro and accelerometer from 150 ms before touch-down to 300 ms after lift-off, on a shared 10 ms grid. Rotation lag is the delay between finger speed and rotation rate from cross-correlation; negative means the phone starts turning before the thumb moves. Coupled rotation is the rotation about the screen axis perpendicular to the stroke (the axis a hand uses to bring the far side of the screen closer), signed relative to the stroke direction, per 100 px of travel. Twist is rotation about the axis through the screen. Consistency is the correlation of this stroke's rotation profile with the mean profile for the same direction. Distances are in CSS pixels; on this phone 100 px is roughly 1.5 to 2 cm.</p>
+
+<script>
+(() => {
+  const VERSION = 1;
+  const PRE = 0.15, POST = 0.3, STEP = 0.01, PROF = 32, MAX_G = 300;
+  const DIRS = ['left', 'right', 'up', 'down'];
+
+  const $ = id => document.getElementById(id);
+  const ui = { start: $('startBtn'), reset: $('resetBtn'), csv: $('csvBtn'), pad: $('pad'), timing: $('timing'), status: $('status'), ver: $('ver'),
+    last: $('last'), lag: $('lag'), coupled: $('coupled'), twist: $('twist'), pre: $('pre'), release: $('release'), speed: $('speed'), consist: $('consist'), counts: $('counts') };
+  const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+  const C = { grid: css('--grid'), rule: css('--rule'), ink: css('--ink'), ink2: css('--ink-2'), ink3: css('--ink-3'), mark: css('--mark'), muted: css('--muted'), band: css('--band') };
+  const FONT = '11px "Avenir Next", "Segoe UI", Roboto, system-ui, sans-serif';
+  const status = m => { ui.status.textContent = m; };
+
+  let running = false, gotEvents = false, noEventTimer = null, wakeLock = null;
+  const buf = [];                     // motion samples {t, a, g}
+  let cur = null;                     // gesture in progress {t0, pts:[[t,x,y]], t1}
+  let gestures = [];
+  const profiles = { left: [], right: [], up: [], down: [] };   // coupled-rotation profiles per direction
+  let lastG = null;
+
+  const ts = e => ((e.timeStamp && e.timeStamp < 1e12) ? e.timeStamp : performance.now()) / 1000;
+
+  function onMotion(e) {
+    const t = ts(e), r = e.rotationRate, a = e.acceleration;
+    if (!a || a.x == null) return;
+    gotEvents = true;
+    buf.push({ t, a: [a.x, a.y, a.z], g: (r && r.alpha != null) ? [r.alpha, r.beta, r.gamma] : [0, 0, 0] });
+    while (buf.length && buf[0].t < t - 4) buf.shift();
+  }
+
+  // ---------- touch ----------
+  function padXY(touch) {
+    const rect = ui.pad.getBoundingClientRect();
+    return [touch.clientX - rect.left, touch.clientY - rect.top];
+  }
+  function onDown(e) {
+    if (!running) { status('Tap Start first.'); return; }
+    e.preventDefault();
+    const touch = e.changedTouches ? e.changedTouches[0] : e;
+    const [x, y] = padXY(touch);
+    cur = { t0: ts(e), pts: [[ts(e), x, y]], t1: null };
+  }
+  function onMove(e) {
+    if (!cur) return;
+    e.preventDefault();
+    const touch = e.changedTouches ? e.changedTouches[0] : e;
+    const [x, y] = padXY(touch);
+    cur.pts.push([ts(e), x, y]);
+  }
+  function onUp(e) {
+    if (!cur) return;
+    const g = cur; cur = null;
+    g.t1 = ts(e);
+    setTimeout(() => finish(g), (POST + 0.08) * 1000);
+  }
+
+  // ---------- analysis ----------
+  function interp(samples, key, axis, tq) {
+    let lo = 0, hi = samples.length - 1;
+    if (tq <= samples[0].t) return samples[0][key][axis];
+    if (tq >= samples[hi].t) return samples[hi][key][axis];
+    while (hi - lo > 1) { const mid = (lo + hi) >> 1; if (samples[mid].t <= tq) lo = mid; else hi = mid; }
+    const p = samples[lo], q = samples[hi], w = (tq - p.t) / (q.t - p.t || 1e-9);
+    return p[key][axis] + w * (q[key][axis] - p[key][axis]);
+  }
+  function interpPts(pts, tq) {
+    if (tq <= pts[0][0]) return [pts[0][1], pts[0][2]];
+    const last = pts[pts.length - 1];
+    if (tq >= last[0]) return [last[1], last[2]];
+    let lo = 0, hi = pts.length - 1;
+    while (hi - lo > 1) { const mid = (lo + hi) >> 1; if (pts[mid][0] <= tq) lo = mid; else hi = mid; }
+    const p = pts[lo], q = pts[hi], w = (tq - p[0]) / (q[0] - p[0] || 1e-9);
+    return [p[1] + w * (q[1] - p[1]), p[2] + w * (q[2] - p[2])];
+  }
+  function corr(a, b) {
+    const n = Math.min(a.length, b.length); let ma = 0, mb = 0;
+    for (let i = 0; i < n; i++) { ma += a[i]; mb += b[i]; } ma /= n; mb /= n;
+    let sab = 0, saa = 0, sbb = 0;
+    for (let i = 0; i < n; i++) { const x = a[i] - ma, y = b[i] - mb; sab += x * y; saa += x * x; sbb += y * y; }
+    return saa > 0 && sbb > 0 ? sab / Math.sqrt(saa * sbb) : 0;
+  }
+  function finish(g) {
+    const dur = g.t1 - g.t0;
+    const dx = g.pts[g.pts.length - 1][1] - g.pts[0][1], dy = g.pts[g.pts.length - 1][2] - g.pts[0][2];
+    const len = Math.hypot(dx, dy);
+    if (g.pts.length < 4 || len < 40 || dur < 0.05) { status('That was a tap or too short; make a longer stroke.'); return; }
+    const s = buf.filter(x => x.t >= g.t0 - PRE - 0.05 && x.t <= g.t1 + POST + 0.05);
+    if (s.length < 10) { status('Not enough motion samples around that stroke.'); return; }
+    const dir = Math.abs(dx) > Math.abs(dy) ? (dx > 0 ? 'right' : 'left') : (dy > 0 ? 'down' : 'up');
+    const horizontal = dir === 'left' || dir === 'right';
+    const sign = (dir === 'right' || dir === 'down') ? 1 : -1;
+    // shared 10 ms grid from PRE before touch-down to POST after lift-off
+    const N = Math.round((PRE + dur + POST) / STEP) + 1;
+    const T = [], X = [], Y = [], SP = [], G = [[], [], []], A = [[], [], []], ANG = [[], [], []];
+    const ang = [0, 0, 0];
+    for (let i = 0; i < N; i++) {
+      const t = g.t0 - PRE + i * STEP; T.push(t - g.t0);
+      const [x, y] = interpPts(g.pts, t); X.push(x); Y.push(y);
+      for (let k = 0; k < 3; k++) { const gv = interp(s, 'g', k, t); G[k].push(gv); A[k].push(interp(s, 'a', k, t)); if (t >= g.t0) ang[k] += gv * STEP; ANG[k].push(ang[k]); }
+    }
+    for (let i = 0; i < N; i++) { const j = Math.max(0, i - 1); SP.push(Math.hypot(X[i] - X[j], Y[i] - Y[j]) / STEP); }
+    const GM = G[0].map((_, i) => Math.hypot(G[0][i], G[1][i], G[2][i]));
+    // lag between finger speed and rotation rate, over the stroke plus margins
+    let bestLag = 0, bestC = -2;
+    const i0 = Math.round(PRE / STEP), i1 = Math.round((PRE + dur) / STEP);
+    for (let L = -20; L <= 20; L++) {
+      const a = [], b = [];
+      for (let i = i0; i <= i1; i++) { const j = i + L; if (j >= 0 && j < N) { a.push(SP[i]); b.push(GM[j]); } }
+      if (a.length > 5) { const c = corr(a, b); if (c > bestC) { bestC = c; bestLag = L; } }
+    }
+    // coupled axis: horizontal stroke pairs with rotation about the device y axis (gamma), vertical with x axis (beta); twist is alpha (about z)
+    const coupledIdx = horizontal ? 2 : 1, crossIdx = horizontal ? 1 : 2;
+    const per100 = 100 / len;
+    const coupled = sign * ANG[coupledIdx][i1] * per100, cross = sign * ANG[crossIdx][i1] * per100, twist = sign * ANG[0][i1] * per100;
+    let pre = 0, rel = 0;
+    for (let i = 0; i < i0; i++) pre += GM[i] * STEP;
+    for (let i = i1; i < N; i++) rel += GM[i] * STEP;
+    let peakSp = 0, peakI = i0; for (let i = i0; i <= i1; i++) if (SP[i] > peakSp) { peakSp = SP[i]; peakI = i; }
+    const decelFrac = (i1 - peakI) / Math.max(1, i1 - i0);
+    // profile: coupled rotation rate against stroke progress, 32 bins, signed
+    const prof = new Float32Array(PROF);
+    for (let b = 0; b < PROF; b++) { const i = i0 + Math.round((b + 0.5) / PROF * (i1 - i0)); prof[b] = sign * G[coupledIdx][Math.min(N - 1, i)]; }
+    const others = profiles[dir];
+    let consist = null;
+    if (others.length >= 2) { const mean = new Float32Array(PROF); for (const p of others) for (let b = 0; b < PROF; b++) mean[b] += p[b] / others.length; consist = corr(prof, mean); }
+    others.push(prof); if (others.length > 60) others.shift();
+    const rec = { t0: g.t0, dir, dur, len, peakSp, lag: bestLag * STEP * 1000, lagC: bestC, coupled, cross, twist, pre, rel, decelFrac, consist, T, X, Y, SP, G, A, ANG, GM, i0, i1 };
+    gestures.push(rec); if (gestures.length > MAX_G) gestures.shift();
+    lastG = rec;
+    ui.csv.disabled = false; ui.reset.disabled = false;
+    updateReadings(); draw();
+  }
+  function meanOf(arr) { const v = arr.filter(x => x != null && isFinite(x)); return v.length ? v.reduce((s, x) => s + x, 0) / v.length : NaN; }
+  function updateReadings() {
+    if (!lastG) return;
+    const same = gestures.filter(g => g.dir === lastG.dir);
+    ui.last.textContent = (lastG.dir === 'left' || lastG.dir === 'right' ? 'swipe ' : 'scroll ') + lastG.dir;
+    ui.lag.textContent = Math.round(lastG.lag) + ' (' + Math.round(meanOf(same.map(g => g.lag))) + ')';
+    ui.coupled.textContent = lastG.coupled.toFixed(1) + ' (' + meanOf(same.map(g => g.coupled)).toFixed(1) + ')';
+    ui.twist.textContent = lastG.twist.toFixed(1) + ' (' + meanOf(same.map(g => g.twist)).toFixed(1) + ')';
+    ui.pre.textContent = lastG.pre.toFixed(1); ui.release.textContent = lastG.rel.toFixed(1);
+    ui.speed.textContent = Math.round(lastG.peakSp);
+    const cm = meanOf(same.slice(-10).map(g => g.consist));
+    ui.consist.textContent = isFinite(cm) ? cm.toFixed(2) : '';
+    ui.counts.textContent = DIRS.map(d => gestures.filter(g => g.dir === d).length).join('/');
+  }
+
+  // ---------- drawing ----------
+  function fitCanvas(c) {
+    const dpr = window.devicePixelRatio || 1, w = c.clientWidth, h = c.clientHeight;
+    const W = Math.round(w * dpr), H = Math.round(h * dpr);
+    if (c.width !== W || c.height !== H) { c.width = W; c.height = H; }
+    const ctx = c.getContext('2d'); ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.clearRect(0, 0, w, h);
+    return [ctx, w, h];
+  }
+  function drawPad() {
+    const [ctx, w, h] = fitCanvas(ui.pad);
+    if (!lastG) {
+      ctx.fillStyle = running ? 'rgba(255,255,255,0.8)' : C.ink; ctx.font = '15px "Avenir Next", "Segoe UI", Roboto, system-ui, sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText(running ? 'Swipe or scroll here' : 'Tap Start', w / 2, h / 2); return;
+    }
+    // earlier strokes of the same direction, faint
+    ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+    for (const g of gestures.filter(x => x.dir === lastG.dir && x !== lastG).slice(-10)) {
+      ctx.strokeStyle = 'rgba(255,255,255,0.18)'; ctx.lineWidth = 2; ctx.beginPath();
+      for (let i = g.i0; i <= g.i1; i++) { if (i === g.i0) ctx.moveTo(g.X[i], g.Y[i]); else ctx.lineTo(g.X[i], g.Y[i]); }
+      ctx.stroke();
+    }
+    // last stroke as a ribbon: width = rotation rate about the coupled axis, colour = sign
+    const g = lastG, ci = (g.dir === 'left' || g.dir === 'right') ? 2 : 1;
+    let gmax = 1; for (let i = g.i0; i <= g.i1; i++) gmax = Math.max(gmax, Math.abs(g.G[ci][i]));
+    for (let i = g.i0 + 1; i <= g.i1; i++) {
+      const rate = g.G[ci][i];
+      ctx.strokeStyle = rate >= 0 ? '#F2C56B' : '#7FB3D5'; ctx.lineWidth = 2 + 14 * Math.abs(rate) / gmax;
+      ctx.beginPath(); ctx.moveTo(g.X[i - 1], g.Y[i - 1]); ctx.lineTo(g.X[i], g.Y[i]); ctx.stroke();
+    }
+    ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(g.X[g.i0], g.Y[g.i0], 5, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = '#fff'; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(g.X[g.i1], g.Y[g.i1], 6, 0, Math.PI * 2); ctx.stroke();
+  }
+  function drawTiming() {
+    const [ctx, w, h] = fitCanvas(ui.timing);
+    const padL = 12, padR = 12, padT = 30, padB = 20, pw = w - padL - padR, ph = h - padT - padB;
+    if (!lastG) { ctx.fillStyle = C.muted; ctx.font = FONT; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(running ? 'Make a stroke' : 'Tap Start', w / 2, h / 2); return; }
+    const g = lastG, N = g.T.length, xOf = i => padL + pw * i / (N - 1);
+    ctx.strokeStyle = C.mark; ctx.setLineDash([4, 4]); ctx.lineWidth = 1;
+    for (const i of [g.i0, g.i1]) { ctx.beginPath(); ctx.moveTo(xOf(i), padT); ctx.lineTo(xOf(i), padT + ph); ctx.stroke(); }
+    ctx.setLineDash([]);
+    ctx.fillStyle = C.muted; ctx.font = FONT; ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+    ctx.fillText('touch', xOf(g.i0), padT + ph + 5); ctx.fillText('lift', xOf(g.i1), padT + ph + 5);
+    const spMax = Math.max(1, ...g.SP), gmMax = Math.max(1, ...g.GM);
+    const plot = (arr, mx, col, lw) => { ctx.strokeStyle = col; ctx.lineWidth = lw; ctx.lineJoin = 'round'; ctx.beginPath(); for (let i = 0; i < N; i++) { const x = xOf(i), y = padT + ph * (1 - arr[i] / mx); if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y); } ctx.stroke(); };
+    plot(g.GM, gmMax, C.mark, 1.5); plot(g.SP, spMax, C.ink, 2);
+    ctx.textAlign = 'right'; ctx.fillStyle = C.muted; ctx.fillText('lag ' + Math.round(g.lag) + ' ms, match ' + g.lagC.toFixed(2), w - padR, padT - 2);
+  }
+  function draw() { drawPad(); drawTiming(); }
+
+  // ---------- controls ----------
+  async function start() {
+    if (running) { stop(); return; }
+    if (typeof DeviceMotionEvent === 'undefined') { status('This browser does not expose motion sensors.'); return; }
+    if (typeof DeviceMotionEvent.requestPermission === 'function') {
+      try { const r = await DeviceMotionEvent.requestPermission(); if (r !== 'granted') { status('Motion access was refused. Reload and allow it.'); return; } }
+      catch (err) { status('Motion access could not be requested. Open the page over HTTPS.'); return; }
+    }
+    if (!window.isSecureContext) { status('Not on HTTPS, so the browser will not deliver sensor data.'); return; }
+    running = true; gotEvents = false; buf.length = 0;
+    window.addEventListener('devicemotion', onMotion);
+    ui.start.textContent = 'Stop'; ui.pad.classList.remove('idle');
+    status('Live. Swipe or scroll on the pad, one stroke at a time.');
+    noEventTimer = setTimeout(() => { if (!gotEvents) status('No motion data is arriving. Check HTTPS and motion access.'); }, 3000);
+    try { if (navigator.wakeLock) wakeLock = await navigator.wakeLock.request('screen'); } catch (err) {}
+    draw();
+  }
+  function stop() {
+    running = false; cur = null;
+    window.removeEventListener('devicemotion', onMotion);
+    clearTimeout(noEventTimer);
+    ui.start.textContent = 'Start'; ui.pad.classList.add('idle');
+    status('Stopped. ' + gestures.length + ' strokes recorded.');
+    if (wakeLock) { wakeLock.release().catch(() => {}); wakeLock = null; }
+    draw();
+  }
+  function reset() {
+    gestures = []; lastG = null; for (const d of DIRS) profiles[d] = [];
+    for (const k of ['last', 'lag', 'coupled', 'twist', 'pre', 'release', 'speed', 'consist', 'counts']) ui[k].textContent = '';
+    ui.csv.disabled = true; ui.reset.disabled = true; status('Cleared.'); draw();
+  }
+  function saveCsv() {
+    if (!gestures.length) return;
+    const rows = ['gesture,dir,t0_s,t_ms,x_px,y_px,speed_pxs,gx,gy,gz,ax,ay,az,ang_x,ang_y,ang_z,dur_ms,len_px,peak_speed,lag_ms,lag_match,coupled_deg_per100,cross_deg_per100,twist_deg_per100,pre_deg,release_deg,decel_frac,consist'];
+    gestures.forEach((g, k) => {
+      for (let i = 0; i < g.T.length; i++) rows.push([k + 1, g.dir, g.t0.toFixed(3), Math.round(g.T[i] * 1000), g.X[i].toFixed(1), g.Y[i].toFixed(1), g.SP[i].toFixed(0),
+        g.G[0][i].toFixed(3), g.G[1][i].toFixed(3), g.G[2][i].toFixed(3), g.A[0][i].toFixed(4), g.A[1][i].toFixed(4), g.A[2][i].toFixed(4),
+        g.ANG[0][i].toFixed(3), g.ANG[1][i].toFixed(3), g.ANG[2][i].toFixed(3),
+        Math.round(g.dur * 1000), g.len.toFixed(0), g.peakSp.toFixed(0), g.lag.toFixed(0), g.lagC.toFixed(3), g.coupled.toFixed(3), g.cross.toFixed(3), g.twist.toFixed(3), g.pre.toFixed(3), g.rel.toFixed(3), g.decelFrac.toFixed(3), g.consist != null ? g.consist.toFixed(3) : ''].join(','));
+    });
+    const blob = new Blob([rows.join('\n')], { type: 'text/csv' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob); a.download = 'gesture_v' + VERSION + '_' + gestures.length + 'strokes.csv';
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+  }
+  ui.start.addEventListener('click', start);
+  ui.reset.addEventListener('click', reset);
+  ui.csv.addEventListener('click', saveCsv);
+  ui.pad.addEventListener('touchstart', onDown, { passive: false });
+  ui.pad.addEventListener('touchmove', onMove, { passive: false });
+  ui.pad.addEventListener('touchend', onUp, { passive: true });
+  ui.pad.addEventListener('touchcancel', onUp, { passive: true });
+  if (!('ontouchstart' in window)) { ui.pad.addEventListener('mousedown', onDown); ui.pad.addEventListener('mousemove', onMove); ui.pad.addEventListener('mouseup', onUp); }
+  window.addEventListener('resize', draw);
+  ui.ver.textContent = 'v' + VERSION;
+  draw();
+})();
+</script>
+</body>
+</html>

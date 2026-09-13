@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#EEF1F4">
+<title>Targeting</title>
+<style>
+  :root {
+    --paper: #EEF1F4; --panel: #F8FAFC; --grid: #DAE1E8; --rule: #B6C1CE;
+    --ink: #14213D; --ink-2: #2F6B9A; --ink-3: #8DA6BF; --band: #F2C56B; --mark: #C8462B; --muted: #5E6B7C;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body {
+    background: var(--paper); color: var(--ink);
+    font-family: "Avenir Next", "Segoe UI", Roboto, system-ui, -apple-system, sans-serif;
+    font-size: 16px; line-height: 1.4;
+    padding: calc(env(safe-area-inset-top) + 18px) 16px calc(env(safe-area-inset-bottom) + 16px);
+    -webkit-text-size-adjust: 100%; overscroll-behavior: none;
+    display: flex; flex-direction: column; gap: 14px;
+  }
+  h1 { font-size: 22px; font-weight: 600; letter-spacing: -0.01em; display: flex; align-items: baseline; gap: 10px; }
+  .ver { font-size: 13px; font-weight: 500; color: var(--muted); }
+  .sub { color: var(--muted); font-size: 14px; margin-top: -8px; }
+  .row { display: flex; gap: 10px; align-items: stretch; }
+  button { font: inherit; border: 0; border-radius: 6px; cursor: pointer; -webkit-tap-highlight-color: transparent; touch-action: manipulation; }
+  button:focus-visible { outline: 2px solid var(--ink-2); outline-offset: 2px; }
+  .primary { flex: 1; background: var(--ink); color: #fff; font-size: 17px; font-weight: 600; padding: 14px 18px; }
+  .secondary { background: transparent; color: var(--ink); border: 1.5px solid var(--rule); padding: 12px 14px; font-size: 15px; }
+  .secondary:disabled { opacity: 0.4; cursor: default; }
+  .readings { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+  .reading { border-top: 2px solid var(--ink); padding-top: 6px; }
+  .reading b { display: block; font-size: 19px; font-weight: 600; font-variant-numeric: tabular-nums; line-height: 1.1; min-height: 1.1em; }
+  .reading small { display: block; color: var(--muted); font-size: 12px; margin-top: 2px; }
+  figure { position: relative; }
+  figure canvas { display: block; width: 100%; background: var(--panel); border: 1.5px solid var(--rule); border-radius: 4px; }
+  figcaption { position: absolute; top: 8px; left: 12px; right: 12px; font-size: 12px; color: var(--muted); pointer-events: none; }
+  #pad { height: 44vh; min-height: 340px; touch-action: none; background: var(--ink); border-color: var(--ink); }
+  #pad.idle { background: #B6C1CE; border-color: #B6C1CE; }
+  #speed { height: 18vh; min-height: 120px; }
+  .status { font-size: 14px; color: var(--muted); min-height: 1.4em; }
+  .note { font-size: 12px; color: var(--muted); }
+</style>
+</head>
+<body>
+<h1>Targeting <span class="ver" id="ver"></span></h1>
+<p class="sub">Hold the phone as usual. Tap Start, put your thumb on the white circle, drag the knob into the ring and let go. Targets vary in size, distance and direction; a block is 16 trials.</p>
+
+<div class="row">
+  <button class="primary" id="startBtn">Start</button>
+  <button class="secondary" id="resetBtn" disabled>Reset</button>
+  <button class="secondary" id="csvBtn" disabled>Save CSV</button>
+</div>
+
+<div class="readings">
+  <div class="reading"><b id="trials"></b><small>trials (hit %)</small></div>
+  <div class="reading"><b id="mt"></b><small>movement time, ms</small></div>
+  <div class="reading"><b id="over"></b><small>overshoot, % of target</small></div>
+  <div class="reading"><b id="rev"></b><small>reversals</small></div>
+  <div class="reading"><b id="lat"></b><small>correction latency, ms</small></div>
+  <div class="reading"><b id="verify"></b><small>verification, ms</small></div>
+  <div class="reading"><b id="straight"></b><small>path straightness, px</small></div>
+  <div class="reading"><b id="rotc"></b><small>hand rotation in correction, °</small></div>
+  <div class="reading"><b id="idx"></b><small>last target difficulty, bits</small></div>
+</div>
+
+<figure>
+  <canvas id="pad" class="idle"></canvas>
+  <figcaption style="color:#fff;opacity:.85">Drag the knob from the white circle into the ring. Last path: dark is the primary movement, amber is the correction.</figcaption>
+</figure>
+<figure>
+  <canvas id="speed"></canvas>
+  <figcaption>Last trial: speed toward the target (dark) and phone rotation rate (red). Dashed line marks the end of the primary movement.</figcaption>
+</figure>
+
+<p class="status" id="status"></p>
+<p class="note">Sixteen target conditions: two distances, two sizes, four directions, shuffled within each block so every session sees the same set. Each trial records the finger path at the screen's rate and both motion sensors from 250 ms before touch-down to 300 ms after release, on a shared 10 ms grid; the pre-touch window is stored for later analysis and not otherwise used. The primary movement ends at the first slowing after peak speed; everything after it is the correction phase. Overshoot is how far the knob passed the target centre along the line of travel, as a percentage of target width. Reversals are direction changes along that line during the correction. Correction latency is the delay between the end of the primary movement and the first corrective burst. Verification is the time spent inside the target before release. Hand rotation in correction is the phone's rotation summed over the correction phase. Difficulty is the Fitts index, log2 of twice the distance over the width.</p>
+
+<script>
+(() => {
+  const VERSION = 1;
+  const PRE = 0.25, POST = 0.3, STEP = 0.01, MAX_TRIALS = 400;
+  const SIZES = [30, 60], DIST_FRAC = [0.55, 1.0], DIRS = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+  const DIRNAME = ['right', 'left', 'down', 'up'];
+
+  const $ = id => document.getElementById(id);
+  const ui = { start: $('startBtn'), reset: $('resetBtn'), csv: $('csvBtn'), pad: $('pad'), speed: $('speed'), status: $('status'), ver: $('ver'),
+    trials: $('trials'), mt: $('mt'), over: $('over'), rev: $('rev'), lat: $('lat'), verify: $('verify'), straight: $('straight'), rotc: $('rotc'), idx: $('idx') };
+  const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+  const C = { grid: css('--grid'), rule: css('--rule'), ink: css('--ink'), ink2: css('--ink-2'), ink3: css('--ink-3'), mark: css('--mark'), muted: css('--muted'), band: css('--band') };
+  const FONT = '11px "Avenir Next", "Segoe UI", Roboto, system-ui, sans-serif';
+  const status = m => { ui.status.textContent = m; };
+  const ts = e => ((e.timeStamp && e.timeStamp < 1e12) ? e.timeStamp : performance.now()) / 1000;
+
+  let running = false, gotEvents = false, noEventTimer = null, wakeLock = null;
+  const buf = [];
+  let block = [], target = null, cur = null, trials = [], last = null, knob = null;
+  const HOME_R = 26;
+
+  function onMotion(e) {
+    const t = ts(e), r = e.rotationRate, a = e.acceleration;
+    if (!a || a.x == null) return;
+    gotEvents = true;
+    buf.push({ t, a: [a.x, a.y, a.z], g: (r && r.alpha != null) ? [r.alpha, r.beta, r.gamma] : [0, 0, 0] });
+    while (buf.length && buf[0].t < t - 4) buf.shift();
+  }
+
+  // ---------- targets ----------
+  function geometry() {
+    const w = ui.pad.clientWidth, h = ui.pad.clientHeight;
+    const home = [w / 2, h / 2];
+    const maxD = Math.min(w / 2, h / 2) - 44;
+    return { w, h, home, maxD };
+  }
+  function newBlock() {
+    block = [];
+    for (const s of SIZES) for (const d of DIST_FRAC) for (let k = 0; k < 4; k++) block.push({ size: s, dfrac: d, dir: k });
+    for (let i = block.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [block[i], block[j]] = [block[j], block[i]]; }
+  }
+  function nextTarget() {
+    if (!block.length) newBlock();
+    const spec = block.pop(), g = geometry();
+    const D = g.maxD * spec.dfrac, v = DIRS[spec.dir];
+    target = { ...spec, D, W: spec.size, x: g.home[0] + v[0] * D, y: g.home[1] + v[1] * D, ux: v[0], uy: v[1], home: g.home, id: Math.log2(2 * D / spec.size) };
+    drawPad();
+  }
+
+  // ---------- touch ----------
+  function padXY(touch) { const r = ui.pad.getBoundingClientRect(); return [touch.clientX - r.left, touch.clientY - r.top]; }
+  function onDown(e) {
+    if (!running || !target) { if (!running) status('Tap Start first.'); return; }
+    e.preventDefault();
+    const touch = e.changedTouches ? e.changedTouches[0] : e;
+    const [x, y] = padXY(touch);
+    if (Math.hypot(x - target.home[0], y - target.home[1]) > HOME_R + 14) { status('Start on the white circle.'); return; }
+    cur = { t0: ts(e), pts: [[ts(e), x, y]], target };
+    knob = [x, y]; drawPad();
+  }
+  function onMove(e) {
+    if (!cur) return;
+    e.preventDefault();
+    const touch = e.changedTouches ? e.changedTouches[0] : e;
+    const [x, y] = padXY(touch);
+    cur.pts.push([ts(e), x, y]); knob = [x, y]; drawPad();
+  }
+  function onUp(e) {
+    if (!cur) return;
+    const tr = cur; cur = null; knob = null;
+    tr.t1 = ts(e);
+    const lastP = tr.pts[tr.pts.length - 1];
+    tr.hit = Math.hypot(lastP[1] - tr.target.x, lastP[2] - tr.target.y) <= tr.target.W / 2;
+    target = null; drawPad();
+    setTimeout(() => finish(tr), (POST + 0.08) * 1000);
+    setTimeout(nextTarget, 450);
+  }
+
+  // ---------- analysis ----------
+  function interp(samples, key, axis, tq) {
+    let lo = 0, hi = samples.length - 1;
+    if (tq <= samples[0].t) return samples[0][key][axis];
+    if (tq >= samples[hi].t) return samples[hi][key][axis];
+    while (hi - lo > 1) { const mid = (lo + hi) >> 1; if (samples[mid].t <= tq) lo = mid; else hi = mid; }
+    const p = samples[lo], q = samples[hi], w = (tq - p.t) / (q.t - p.t || 1e-9);
+    return p[key][axis] + w * (q[key][axis] - p[key][axis]);
+  }
+  function interpPts(pts, tq) {
+    if (tq <= pts[0][0]) return [pts[0][1], pts[0][2]];
+    const lastP = pts[pts.length - 1];
+    if (tq >= lastP[0]) return [lastP[1], lastP[2]];
+    let lo = 0, hi = pts.length - 1;
+    while (hi - lo > 1) { const mid = (lo + hi) >> 1; if (pts[mid][0] <= tq) lo = mid; else hi = mid; }
+    const p = pts[lo], q = pts[hi], w = (tq - p[0]) / (q[0] - p[0] || 1e-9);
+    return [p[1] + w * (q[1] - p[1]), p[2] + w * (q[2] - p[2])];
+  }
+  function finish(tr) {
+    const T0 = tr.target, dur = tr.t1 - tr.t0;
+    if (tr.pts.length < 4 || dur < 0.08) { status('Too short to score; try again.'); return; }
+    const s = buf.filter(x => x.t >= tr.t0 - PRE - 0.05 && x.t <= tr.t1 + POST + 0.05);
+    if (s.length < 10) { status('Not enough motion samples around that trial.'); return; }
+    const N = Math.round((PRE + dur + POST) / STEP) + 1;
+    const T = [], X = [], Y = [], S = [], P = [], V = [], G = [[], [], []], A = [[], [], []], GM = [];
+    for (let i = 0; i < N; i++) {
+      const t = tr.t0 - PRE + i * STEP; T.push(t - tr.t0);
+      const [x, y] = interpPts(tr.pts, t); X.push(x); Y.push(y);
+      const dx = x - T0.home[0], dy = y - T0.home[1];
+      S.push(dx * T0.ux + dy * T0.uy); P.push(-dx * T0.uy + dy * T0.ux);
+      for (let k = 0; k < 3; k++) { G[k].push(interp(s, 'g', k, t)); A[k].push(interp(s, 'a', k, t)); }
+      GM.push(Math.hypot(G[0][i], G[1][i], G[2][i]));
+    }
+    // causal velocity along the line of travel, lightly smoothed
+    for (let i = 0; i < N; i++) { const j = Math.max(0, i - 1), k = Math.max(0, i - 2); V.push((S[i] - S[k]) / (2 * STEP)); if (i === 0) V[0] = 0; }
+    const i0 = Math.round(PRE / STEP), i1 = Math.round((PRE + dur) / STEP);
+    // movement start: first sample the knob moves at over 40 px/s
+    let iStart = i0; for (let i = i0; i <= i1; i++) if (Math.abs(V[i]) > 40) { iStart = i; break; }
+    let vmax = 0, iPeak = iStart; for (let i = iStart; i <= i1; i++) if (V[i] > vmax) { vmax = V[i]; iPeak = i; }
+    // primary phase ends at the first slowing below 15% of peak after the peak, or the first reversal
+    let iPrim = i1; for (let i = iPeak; i <= i1; i++) if (V[i] < 0.15 * vmax) { iPrim = i; break; }
+    let over = -Infinity; for (let i = iStart; i <= i1; i++) over = Math.max(over, S[i] - T0.D);
+    const overPct = 100 * Math.max(0, over) / T0.W;
+    // corrective phase: reversals, bursts, latency
+    let rev = 0, bursts = 0, iFirstBurst = -1, prevSign = 0, inBurst = false;
+    for (let i = iPrim; i <= i1; i++) {
+      const v = V[i], sg = Math.abs(v) > 30 ? Math.sign(v) : 0;
+      if (sg && prevSign && sg !== prevSign) rev++;
+      if (sg) prevSign = sg;
+      const big = Math.abs(v) > 0.15 * vmax;
+      if (big && !inBurst) { bursts++; if (iFirstBurst < 0) iFirstBurst = i; }
+      inBurst = big;
+    }
+    const latency = iFirstBurst >= 0 ? (iFirstBurst - iPrim) * STEP * 1000 : null;
+    // verification: time inside the target before release
+    let iEnter = i1; for (let i = i1; i >= iStart; i--) { const inside = Math.hypot(X[i] - T0.x, Y[i] - T0.y) <= T0.W / 2; if (!inside) break; iEnter = i; }
+    const verify = (i1 - iEnter) * STEP * 1000;
+    let ss = 0; for (let i = iStart; i <= i1; i++) ss += P[i] * P[i]; const straight = Math.sqrt(ss / Math.max(1, i1 - iStart + 1));
+    let rotP = 0, rotC = 0, rotPre = 0;
+    for (let i = iStart; i < iPrim; i++) rotP += GM[i] * STEP;
+    for (let i = iPrim; i <= i1; i++) rotC += GM[i] * STEP;
+    for (let i = 0; i < i0; i++) rotPre += GM[i] * STEP;
+    const endErr = Math.hypot(X[i1] - T0.x, Y[i1] - T0.y);
+    let approach = 0, na = 0; for (let i = Math.max(iStart, i1 - 10); i <= i1; i++) { approach += Math.abs(V[i]); na++; }
+    const rec = { t0: tr.t0, dir: DIRNAME[T0.dir], D: T0.D, W: T0.W, id: T0.id, hit: tr.hit, dur, mt: (i1 - iStart) * STEP * 1000, vmax, tPeak: (iPeak - iStart) * STEP * 1000,
+      primDur: (iPrim - iStart) * STEP * 1000, overPct, rev, bursts, latency, verify, straight, rotP, rotC, rotPre, endErr, approach: na ? approach / na : 0,
+      T, X, Y, S, P, V, G, A, GM, i0, i1, iStart, iPeak, iPrim };
+    trials.push(rec); if (trials.length > MAX_TRIALS) trials.shift();
+    last = rec; ui.csv.disabled = false; ui.reset.disabled = false;
+    updateReadings(); drawPad(); drawSpeed();
+  }
+  const meanOf = arr => { const v = arr.filter(x => x != null && isFinite(x)); return v.length ? v.reduce((s, x) => s + x, 0) / v.length : NaN; };
+  const fmt = (v, d = 0) => isFinite(v) ? v.toFixed(d) : '';
+  function updateReadings() {
+    if (!last) return;
+    const hits = trials.filter(t => t.hit).length;
+    ui.trials.textContent = trials.length + ' (' + Math.round(100 * hits / trials.length) + '%)';
+    ui.mt.textContent = fmt(last.mt) + ' (' + fmt(meanOf(trials.map(t => t.mt))) + ')';
+    ui.over.textContent = fmt(last.overPct) + ' (' + fmt(meanOf(trials.map(t => t.overPct))) + ')';
+    ui.rev.textContent = last.rev + ' (' + fmt(meanOf(trials.map(t => t.rev)), 1) + ')';
+    ui.lat.textContent = (last.latency != null ? fmt(last.latency) : 'none') + ' (' + fmt(meanOf(trials.map(t => t.latency))) + ')';
+    ui.verify.textContent = fmt(last.verify) + ' (' + fmt(meanOf(trials.map(t => t.verify))) + ')';
+    ui.straight.textContent = fmt(last.straight, 1) + ' (' + fmt(meanOf(trials.map(t => t.straight)), 1) + ')';
+    ui.rotc.textContent = fmt(last.rotC, 1) + ' (' + fmt(meanOf(trials.map(t => t.rotC)), 1) + ')';
+    ui.idx.textContent = last.id.toFixed(1) + ' ' + last.dir;
+  }
+
+  // ---------- drawing ----------
+  function fitCanvas(c) {
+    const dpr = window.devicePixelRatio || 1, w = c.clientWidth, h = c.clientHeight;
+    const W = Math.round(w * dpr), H = Math.round(h * dpr);
+    if (c.width !== W || c.height !== H) { c.width = W; c.height = H; }
+    const ctx = c.getContext('2d'); ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.clearRect(0, 0, w, h);
+    return [ctx, w, h];
+  }
+  function drawPad() {
+    const [ctx, w, h] = fitCanvas(ui.pad);
+    if (!running) { ctx.fillStyle = C.ink; ctx.font = '15px "Avenir Next", "Segoe UI", Roboto, system-ui, sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText('Tap Start', w / 2, h / 2); return; }
+    // last path, faint, primary in white and correction in amber
+    if (last && !cur) {
+      ctx.lineCap = 'round'; ctx.lineJoin = 'round'; ctx.lineWidth = 3;
+      ctx.strokeStyle = 'rgba(255,255,255,0.45)'; ctx.beginPath();
+      for (let i = last.iStart; i <= last.iPrim; i++) { if (i === last.iStart) ctx.moveTo(last.X[i], last.Y[i]); else ctx.lineTo(last.X[i], last.Y[i]); }
+      ctx.stroke();
+      ctx.strokeStyle = C.band; ctx.beginPath();
+      for (let i = last.iPrim; i <= last.i1; i++) { if (i === last.iPrim) ctx.moveTo(last.X[i], last.Y[i]); else ctx.lineTo(last.X[i], last.Y[i]); }
+      ctx.stroke();
+    }
+    const g = geometry();
+    // home
+    ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(g.home[0], g.home[1], HOME_R, 0, Math.PI * 2); ctx.fill();
+    // target ring
+    if (target) {
+      ctx.strokeStyle = C.band; ctx.lineWidth = 4; ctx.beginPath(); ctx.arc(target.x, target.y, target.W / 2, 0, Math.PI * 2); ctx.stroke();
+      ctx.fillStyle = 'rgba(242,197,107,0.15)'; ctx.fill();
+    }
+    // knob
+    if (knob) { ctx.fillStyle = C.ink2; ctx.beginPath(); ctx.arc(knob[0], knob[1], 18, 0, Math.PI * 2); ctx.fill(); ctx.strokeStyle = '#fff'; ctx.lineWidth = 2; ctx.stroke(); }
+  }
+  function drawSpeed() {
+    const [ctx, w, h] = fitCanvas(ui.speed);
+    const padL = 12, padR = 12, padT = 30, padB = 20, pw = w - padL - padR, ph = h - padT - padB;
+    if (!last) { ctx.fillStyle = C.muted; ctx.font = FONT; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(running ? 'Complete a trial' : 'Tap Start', w / 2, h / 2); return; }
+    const N = last.T.length, xOf = i => padL + pw * i / (N - 1);
+    ctx.setLineDash([4, 4]); ctx.lineWidth = 1; ctx.strokeStyle = C.mark;
+    for (const i of [last.iStart, last.i1]) { ctx.beginPath(); ctx.moveTo(xOf(i), padT); ctx.lineTo(xOf(i), padT + ph); ctx.stroke(); }
+    ctx.strokeStyle = C.ink; ctx.beginPath(); ctx.moveTo(xOf(last.iPrim), padT); ctx.lineTo(xOf(last.iPrim), padT + ph); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = C.muted; ctx.font = FONT; ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+    ctx.fillText('move', xOf(last.iStart), padT + ph + 5); ctx.fillText('primary end', xOf(last.iPrim), padT + ph + 5); ctx.fillText('release', xOf(last.i1), padT + ph + 5);
+    const vAbs = last.V.map(Math.abs), vMax = Math.max(1, ...vAbs), gMax = Math.max(1, ...last.GM);
+    const plot = (arr, mx, col, lw) => { ctx.strokeStyle = col; ctx.lineWidth = lw; ctx.lineJoin = 'round'; ctx.beginPath(); for (let i = 0; i < N; i++) { const x = xOf(i), y = padT + ph * (1 - arr[i] / mx); if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y); } ctx.stroke(); };
+    plot(last.GM, gMax, C.mark, 1.5); plot(vAbs, vMax, C.ink, 2);
+    ctx.textAlign = 'right'; ctx.fillStyle = C.muted; ctx.fillText((last.hit ? 'hit' : 'miss') + ', ' + Math.round(last.mt) + ' ms, ' + last.rev + ' reversals', w - padR, padT - 2);
+  }
+
+  // ---------- controls ----------
+  async function start() {
+    if (running) { stop(); return; }
+    if (typeof DeviceMotionEvent === 'undefined') { status('This browser does not expose motion sensors.'); return; }
+    if (typeof DeviceMotionEvent.requestPermission === 'function') {
+      try { const r = await DeviceMotionEvent.requestPermission(); if (r !== 'granted') { status('Motion access was refused. Reload and allow it.'); return; } }
+      catch (err) { status('Motion access could not be requested. Open the page over HTTPS.'); return; }
+    }
+    if (!window.isSecureContext) { status('Not on HTTPS, so the browser will not deliver sensor data.'); return; }
+    running = true; gotEvents = false; buf.length = 0; cur = null; knob = null;
+    window.addEventListener('devicemotion', onMotion);
+    ui.start.textContent = 'Stop'; ui.pad.classList.remove('idle');
+    status('Live. Drag from the white circle into the ring, then let go.');
+    noEventTimer = setTimeout(() => { if (!gotEvents) status('No motion data is arriving. Check HTTPS and motion access.'); }, 3000);
+    try { if (navigator.wakeLock) wakeLock = await navigator.wakeLock.request('screen'); } catch (err) {}
+    newBlock(); nextTarget(); drawSpeed();
+  }
+  function stop() {
+    running = false; cur = null; knob = null; target = null;
+    window.removeEventListener('devicemotion', onMotion);
+    clearTimeout(noEventTimer);
+    ui.start.textContent = 'Start'; ui.pad.classList.add('idle');
+    status('Stopped. ' + trials.length + ' trials recorded.');
+    if (wakeLock) { wakeLock.release().catch(() => {}); wakeLock = null; }
+    drawPad(); drawSpeed();
+  }
+  function reset() {
+    trials = []; last = null;
+    for (const k of ['trials', 'mt', 'over', 'rev', 'lat', 'verify', 'straight', 'rotc', 'idx']) ui[k].textContent = '';
+    ui.csv.disabled = true; ui.reset.disabled = true; status('Cleared.'); drawPad(); drawSpeed();
+  }
+  function saveCsv() {
+    if (!trials.length) return;
+    const rows = ['trial,dir,dist_px,width_px,difficulty_bits,hit,t0_s,t_ms,x_px,y_px,along_px,across_px,v_along_pxs,gx,gy,gz,ax,ay,az,move_time_ms,peak_speed,time_to_peak_ms,primary_ms,overshoot_pct,reversals,bursts,correction_latency_ms,verify_ms,straightness_px,rot_primary_deg,rot_correction_deg,rot_pre_touch_deg,end_error_px,approach_speed'];
+    trials.forEach((r, k) => {
+      for (let i = 0; i < r.T.length; i++) rows.push([k + 1, r.dir, r.D.toFixed(0), r.W, r.id.toFixed(2), r.hit ? 1 : 0, r.t0.toFixed(3), Math.round(r.T[i] * 1000), r.X[i].toFixed(1), r.Y[i].toFixed(1), r.S[i].toFixed(1), r.P[i].toFixed(1), r.V[i].toFixed(0),
+        r.G[0][i].toFixed(3), r.G[1][i].toFixed(3), r.G[2][i].toFixed(3), r.A[0][i].toFixed(4), r.A[1][i].toFixed(4), r.A[2][i].toFixed(4),
+        Math.round(r.mt), r.vmax.toFixed(0), Math.round(r.tPeak), Math.round(r.primDur), r.overPct.toFixed(1), r.rev, r.bursts, r.latency != null ? Math.round(r.latency) : '', Math.round(r.verify), r.straight.toFixed(2), r.rotP.toFixed(3), r.rotC.toFixed(3), r.rotPre.toFixed(3), r.endErr.toFixed(1), r.approach.toFixed(0)].join(','));
+    });
+    const blob = new Blob([rows.join('\n')], { type: 'text/csv' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob); a.download = 'target_v' + VERSION + '_' + trials.length + 'trials.csv';
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+  }
+  ui.start.addEventListener('click', start);
+  ui.reset.addEventListener('click', reset);
+  ui.csv.addEventListener('click', saveCsv);
+  ui.pad.addEventListener('touchstart', onDown, { passive: false });
+  ui.pad.addEventListener('touchmove', onMove, { passive: false });
+  ui.pad.addEventListener('touchend', onUp, { passive: true });
+  ui.pad.addEventListener('touchcancel', onUp, { passive: true });
+  if (!('ontouchstart' in window)) { ui.pad.addEventListener('mousedown', onDown); ui.pad.addEventListener('mousemove', onMove); ui.pad.addEventListener('mouseup', onUp); }
+  window.addEventListener('resize', () => { drawPad(); drawSpeed(); });
+  ui.ver.textContent = 'v' + VERSION;
+  drawPad(); drawSpeed();
+})();
+</script>
+</body>
+</html>
