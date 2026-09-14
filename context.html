@@ -78,16 +78,17 @@
 <div class="labels" id="labels"></div>
 
 <p class="status" id="status"></p>
-<p class="note">Detection is rule based, from six indicators: low-frequency movement, screen angle from gravity, slow sway of the screen angle, step rhythm, the ratio of rotation to linear vibration in the 4 to 12 Hz band, and gyro power in that band. Thresholds are constants at the top of the script and are first guesses; the logged CSV (four rows a second, indicators plus detected and labelled context) is what tunes them or trains a classifier. Seated and standing are not separated: a first labelled run showed the same sway for both. Lying on your back is read from a flat screen facing downward while in hand; lying on your side is not detectable this way and will read as seated.</p>
+<p class="note">Detection is rule based, from six indicators: low-frequency movement, screen angle from gravity, slow sway of the screen angle, step rhythm, the ratio of rotation to linear vibration in the 4 to 12 Hz band, and gyro power in that band. Vehicle is called when the gyro band stays busy with modest movement and no step rhythm for several seconds, and it overrides walking; still needs a quiet gyro band as well as low movement. The vehicle sub-labels (in hand, mounted, on seat, stopped) are label only and go into the file as written. Thresholds are constants at the top of the script; the logged CSV (four rows a second, indicators plus detected and labelled context) is what tunes them or trains a classifier. Seated and standing are not separated: a first labelled run showed the same sway for both. Lying on your back is read from a flat screen facing downward while in hand; lying on your side is not detectable this way and will read as seated.</p>
 
 <script>
 (() => {
-  const VERSION = 6;
+  const VERSION = 7;
   const IOS = /iP(hone|ad|od)/.test(navigator.userAgent);   // iOS reports gravity with the opposite sign to the spec
   // thresholds (first guesses; tune from logged data)
   const SURFACE_LF = 0.04, SURFACE_TREMOR = 0.2;   // on a surface: almost no movement and no tremor on the gyro
   const MOVING_LF = 0.6;                             // hand or body moving (standing still with phone in hand reaches ~0.5 in logged data)
-  const VEHICLE_LF = 0.10, VEHICLE_RATIO = 9;        // sustained vibration without steps, linear rather than rotational
+  const VEHICLE_LF_MAX = 1.0, VEHICLE_GYRO = 2.0, VEHICLE_TC = 8;   // vehicle: modest movement, busy 4 to 12 Hz gyro band, sustained for seconds
+  const STILL_GYRO_MAX = 2.0;                        // still also needs a quiet gyro band (a drive read as still on movement alone)
   const SWING_LF = 2.5;                              // movement level only a swinging arm reaches
   const WALK_MIN_LF = 0.7, WALK_HOLD = 2;            // steps only count with real movement; walking persists 2 s after the last lock
   const MOVING_GYRO = 6;                             // moving if movement is modest but the gyro band is busy
@@ -104,7 +105,8 @@
     ['walk_swing', 'Walking, arm swinging', '#A02A24'],
     ['vehicle', 'Vehicle', '#6A4C93'],
   ];
-  const LABEL_ONLY = [['seated', 'Seated (label only)', '#2E8B57'], ['standing', 'Standing (label only)', '#3AA76D']];
+  const LABEL_ONLY = [['seated', 'Seated (label only)', '#2E8B57'], ['standing', 'Standing (label only)', '#3AA76D'],
+    ['vehicle_hand', 'Vehicle, in hand', '#6A4C93'], ['vehicle_mount', 'Vehicle, mounted', '#7E5FA6'], ['vehicle_seat', 'Vehicle, on seat', '#8F74B5'], ['vehicle_stopped', 'Vehicle, stopped', '#A58BC7']];
   const COLOR = Object.fromEntries([...CONTEXTS, ...LABEL_ONLY].map(c => [c[0], c[2]]));
   const NAME = Object.fromEntries([...CONTEXTS, ...LABEL_ONLY].map(c => [c[0], c[1]]));
 
@@ -139,7 +141,7 @@
   let grav = null, gravFast = null;   // slow and fast low-passed gravity vectors
   const tiltBuf = [];                 // [t, tilt] last 5 s for sway and swing
   let stepS = { p1: 0, p2: 0, t1: 0, lastT: -10, peakEma: 0, times: [] };
-  let label = '', current = null, currentSub = '', faceDown = false, lastWalkT = -10, lastSwingT = -10, lastCadence = 0;
+  let label = '', current = null, currentSub = '', faceDown = false, lastWalkT = -10, lastSwingT = -10, lastCadence = 0, vehEma = 0, inVehicle = false;
   const history = [];                 // [t, detected, label] every 250 ms
   const log = [];                     // CSV rows
   const MAX_LOG = 20000;
@@ -237,17 +239,21 @@
   }
   function classify(x) {
     if (x.lf < SURFACE_LF && x.tremG < SURFACE_TREMOR) return ['surface', 'no movement, no tremor'];
+    if (inVehicle) return ['vehicle', 'sustained vibration in the gyro band without steps'];
     if (x.walking) return x.swinging ? ['walk_swing', 'steps at ' + x.cadence.toFixed(1) + '/s, arm swinging'] : ['walk_held', 'steps at ' + x.cadence.toFixed(1) + '/s, screen steady'];
     if (x.lf > SWING_LF && x.swing > 5) return ['walk_swing', 'large rhythmic movement, arm swinging'];
-    if (x.lf > VEHICLE_LF && x.ratio < VEHICLE_RATIO && x.ratio > 0) return ['vehicle', 'sustained vibration, mostly linear, no steps'];
     if (x.lf > MOVING_LF) return ['moving', 'movement above ' + MOVING_LF + ' m/s²'];
     if (x.lf > 0.25 && x.tremG > MOVING_GYRO) return ['moving', 'hand turning, gyro band busy'];
     if (x.tilt < FLAT_ANGLE) return x.faceDown ? ['lying', 'screen flat and facing down, in hand'] : ['flat', 'screen within ' + FLAT_ANGLE + '° of horizontal, face up'];
+    if (x.tremG > STILL_GYRO_MAX) return ['moving', 'gyro band busy (' + x.tremG.toFixed(1) + ' deg/s)'];
     return ['still', 'in hand, little movement'];
   }
   function analyse() {
     if (!F) return;
     const x = indicators();
+    const vehicleLike = (x.lf < VEHICLE_LF_MAX && x.tremG > VEHICLE_GYRO && !x.regular) ? 1 : 0;
+    vehEma += (vehicleLike - vehEma) * (0.25 / VEHICLE_TC);
+    if (!inVehicle && vehEma > 0.6) inVehicle = true; else if (inVehicle && vehEma < 0.4) inVehicle = false;
     const [ctx, why] = classify(x);
     current = ctx; currentSub = why;
     ui.ctx.textContent = NAME[ctx]; ui.ctxSub.textContent = why; ui.banner.style.background = COLOR[ctx];
@@ -303,7 +309,7 @@
     if (!window.isSecureContext) { status('Not on HTTPS, so the browser will not deliver sensor data.'); return; }
     running = true; calibrating = true; intervals = []; lastT = null; gotEvents = false; grav = null; gravFast = null; tiltBuf.length = 0;
     ema = { lf: 0, g412: 0, a412: 0, sway: 0 }; stepS = { p1: 0, p2: 0, t1: 0, lastT: -10, peakEma: 0, times: [] };
-    history.length = 0; log.length = 0; lastWalkT = -10; lastSwingT = -10; lastCadence = 0;
+    history.length = 0; log.length = 0; lastWalkT = -10; lastSwingT = -10; lastCadence = 0; vehEma = 0; inVehicle = false;
     window.addEventListener('devicemotion', onMotion);
     ui.start.textContent = 'Stop'; ui.ctx.textContent = 'Measuring sample rate'; ui.ctxSub.textContent = ''; ui.banner.style.background = '#5E6B7C';
     status('Measuring the sample rate.');

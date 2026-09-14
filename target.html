@@ -46,7 +46,7 @@
 </head>
 <body>
 <h1>Targeting <span class="ver" id="ver"></span></h1>
-<p class="sub">Hold the phone as usual. Tap Start, put your thumb on the white circle, drag the knob into the ring and let go. Twelve warm-up trials first (not saved), then 60 saved trials balanced across the four directions.</p>
+<p class="sub">Hold the phone as usual. Tap Start, put your thumb on the white circle, drag the knob into the ring and let go. Twenty warm-up trials first (flagged, not scored), then 60 scored trials balanced across the four directions.</p>
 
 <div class="row">
   <button class="primary" id="startBtn">Start</button>
@@ -76,14 +76,15 @@
 </figure>
 
 <p class="status" id="status"></p>
-<p class="note">Nine size and distance pairs (20, 30 and 60 px targets at 70, 125 and 250 px, difficulty roughly 1.4 to 4.7 bits; the 30/60 px and 70/125 px pairs match earlier runs) in each of four directions, presented in rounds of one per direction so the saved set is balanced. The first 12 trials are warm-up and are flagged in the CSV; 60 trials are then saved. Each trial records the finger path at the screen's rate and both motion sensors from 250 ms before touch-down to 300 ms after release, on a shared 10 ms grid; the pre-touch window is stored for later analysis and not otherwise used. The primary movement ends at the first slowing after peak speed; everything after it is the correction phase. Overshoot is how far the knob passed the target centre along the line of travel, as a percentage of target width. Reversals are direction changes along that line during the correction. Correction latency is the delay between the end of the primary movement and the first corrective burst. Verification is the time spent inside the target before release. Hand rotation in correction is the phone's rotation summed over the correction phase. Difficulty is the Fitts index, log2 of twice the distance over the width.</p>
+<p class="note">Nine size and distance pairs (20, 30 and 60 px targets at 70, 125 and 250 px, difficulty roughly 1.4 to 4.7 bits; the 30/60 px and 70/125 px pairs match earlier runs) in each of four directions, presented in rounds of one per direction so the saved set is balanced. A 12 px target at 300 px is added on top, taking difficulty to about 5.6 bits. The first 20 trials are warm-up and are flagged in the CSV; 60 trials are then scored. A hit means the finger centre is inside the target circle, and the rule is written into the file. Each trial records the finger path at the screen's rate and both motion sensors from 250 ms before touch-down to 300 ms after release, on a shared 10 ms grid; the pre-touch window is stored for later analysis and not otherwise used. The primary movement ends at the first slowing after peak speed; everything after it is the correction phase. Overshoot is how far the knob passed the target centre along the line of travel, as a percentage of target width. Reversals are direction changes along that line during the correction. Correction latency is the delay between the end of the primary movement and the first corrective burst. Verification is the time spent inside the target before release. Hand rotation in correction is the phone's rotation summed over the correction phase. Difficulty is the Fitts index, log2 of twice the distance over the width.</p>
 
 <script>
 (() => {
-  const VERSION = 2;
+  const VERSION = 4;
   const PRE = 0.25, POST = 0.3, STEP = 0.01, MAX_TRIALS = 400;
-  const SIZES = [20, 30, 60], DISTS = [70, 125, 250], DIRS = [[1, 0], [-1, 0], [0, 1], [0, -1]];   // px; 30/60 and 70/125 match the v1 runs
-  const WARMUP = 12, SAVED = 60, MARGIN = 34;
+  const SIZES = [20, 30, 60], DISTS = [70, 125, 250], EXTRA = [{ size: 12, dist: 300 }], DIRS = [[1, 0], [-1, 0], [0, 1], [0, -1]];   // px; 30/60 and 70/125 match the v1 runs; 12 at 300 reaches about 5.6 bits
+  const WARMUP = 20, SAVED = 60, MARGIN = 34;
+  const HIT_RULE = 'centre_inside';   // a hit means the finger centre is inside the target circle
   const DIRNAME = ['right', 'left', 'down', 'up'];
 
   const $ = id => document.getElementById(id);
@@ -99,6 +100,8 @@
   const buf = [];
   let plan = [], planIdx = 0, target = null, cur = null, trials = [], last = null, knob = null, done = false;
   const HOME_R = 26;
+  let rafPending = false;
+  function requestDraw() { if (rafPending) return; rafPending = true; requestAnimationFrame(() => { rafPending = false; drawPad(); }); }
 
   function onMotion(e) {
     const t = ts(e), r = e.rotationRate, a = e.acceleration;
@@ -115,6 +118,7 @@
     // rounds of four trials, one per direction, so any multiple of four is direction-balanced;
     // within a direction the nine size/distance pairs cycle in a shuffled order
     const combos = []; for (const s of SIZES) for (const d of DISTS) combos.push({ size: s, dist: d });
+    combos.push(...EXTRA);
     const perDir = [0, 1, 2, 3].map(() => shuffle(combos.slice()));
     const order = [], total = WARMUP + SAVED;
     for (let r = 0; r < Math.ceil(total / 4); r++) {
@@ -146,14 +150,14 @@
     if (Math.hypot(x - target.home[0], y - target.home[1]) > HOME_R + 14) { status('Start on the white circle.'); return; }
     cur = { t0: ts(e), pts: [[ts(e), x, y]], target };
     planIdx++;
-    knob = [x, y]; drawPad();
+    knob = [x, y]; requestDraw();
   }
   function onMove(e) {
     if (!cur) return;
     e.preventDefault();
     const touch = e.changedTouches ? e.changedTouches[0] : e;
     const [x, y] = padXY(touch);
-    cur.pts.push([ts(e), x, y]); knob = [x, y]; drawPad();
+    cur.pts.push([ts(e), x, y]); knob = [x, y]; requestDraw();
   }
   function onUp(e) {
     if (!cur) return;
@@ -339,6 +343,7 @@
         r.G[0][i].toFixed(3), r.G[1][i].toFixed(3), r.G[2][i].toFixed(3), r.A[0][i].toFixed(4), r.A[1][i].toFixed(4), r.A[2][i].toFixed(4),
         Math.round(r.mt), r.vmax.toFixed(0), Math.round(r.tPeak), Math.round(r.primDur), r.overPct.toFixed(1), r.rev, r.bursts, r.latency != null ? Math.round(r.latency) : '', Math.round(r.verify), r.straight.toFixed(2), r.rotP.toFixed(3), r.rotC.toFixed(3), r.rotPre.toFixed(3), r.endErr.toFixed(1), r.approach.toFixed(0), r.warmup ? 1 : 0, r.index + 1, r.home[0].toFixed(0), r.home[1].toFixed(0)].join(','));
     });
+    rows.push('# hit_rule,' + HIT_RULE + ',warmup,' + WARMUP + ',saved,' + SAVED + ',pre_touch_ms,' + Math.round(PRE * 1000) + ',post_release_ms,' + Math.round(POST * 1000));
     const blob = new Blob([rows.join('\n')], { type: 'text/csv' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob); a.download = 'target_v' + VERSION + '_' + trials.length + 'trials.csv';

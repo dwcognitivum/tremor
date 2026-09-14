@@ -30,6 +30,9 @@
   .primary { flex: 1; background: var(--ink); color: #fff; font-size: 17px; font-weight: 600; padding: 14px 18px; }
   .secondary { background: transparent; color: var(--ink); border: 1.5px solid var(--rule); padding: 12px 14px; font-size: 15px; }
   .secondary:disabled { opacity: 0.4; cursor: default; }
+  .seg { display: inline-flex; border: 1.5px solid var(--rule); border-radius: 6px; overflow: hidden; }
+  .seg button { background: transparent; color: var(--muted); padding: 10px 14px; font-size: 14px; border-radius: 0; }
+  .seg button[aria-pressed="true"] { background: var(--ink); color: #fff; }
   .readings { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
   .reading { border-top: 2px solid var(--ink); padding-top: 6px; }
   .reading b { display: block; font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; line-height: 1.1; min-height: 1.1em; }
@@ -62,6 +65,12 @@
   <button class="secondary" id="resetBtn" disabled>Reset</button>
   <button class="secondary" id="csvBtn" disabled>Save CSV</button>
 </div>
+<div class="row">
+  <div class="seg" role="group" aria-label="Grip" style="flex:1">
+    <button id="gripNormal" aria-pressed="true" style="flex:1">Normal grip</button>
+    <button id="gripTight" aria-pressed="false" style="flex:1">Tight grip</button>
+  </div>
+</div>
 
 <div class="readings">
   <div class="reading"><b id="count"></b><small>taps</small></div>
@@ -87,13 +96,14 @@
 </figure>
 
 <p class="status" id="status"></p>
-<p class="note">Each tap captures 100 ms before and 400 ms after touch-down from both sensors, aligned at the touch, with the pre-tap level subtracted. Features per tap: peak accelerometer and gyro response, rotation per unit push (gyro peak over accelerometer peak, which barely depends on how hard you tap), the rocking frequency of the phone in the hand, time for the response to settle below 20% of its peak, which axes carry the response (a grip signature), dwell time and contact size from the touch itself, and correlation of the tap with the running mean. Browsers deliver motion at about 60 samples a second, which is coarse for a response this fast; a native app at 100 to 200 Hz would resolve it much better. Save CSV writes every tap's aligned window in long form.</p>
+<p class="note">Each tap captures 100 ms before and 600 ms after touch-down from both sensors, aligned at the touch, with the pre-tap level subtracted. Settle is when the gyro falls back to within 1.5 times its own pre-tap level, so it works on phones with different noise floors; taps that never settle inside the window are flagged. Choose the grip before tapping; it goes into the filename and the file. Features per tap: peak accelerometer and gyro response, rotation per unit push (gyro peak over accelerometer peak, which barely depends on how hard you tap), the rocking frequency of the phone in the hand, time for the response to settle below 20% of its peak, which axes carry the response (a grip signature), dwell time and contact size from the touch itself, and correlation of the tap with the running mean. Browsers deliver motion at about 60 samples a second, which is coarse for a response this fast; a native app at 100 to 200 Hz would resolve it much better. Save CSV writes every tap's aligned window in long form.</p>
 
 <script>
 (() => {
-  const VERSION = 3;
-  const MIN_GAP = 0.6;                                // seconds between taps so windows never overlap
-  const PRE = 0.1, POST = 0.4, STEP = 0.01;          // window in seconds, 10 ms bins
+  const VERSION = 4;
+  const MIN_GAP = 0.8;                                // seconds between taps so windows never overlap
+  const SETTLE_K = 1.5;                               // settled when the gyro falls back to within this multiple of its pre-tap level
+  const PRE = 0.1, POST = 0.6, STEP = 0.01;          // window in seconds, 10 ms bins (600 ms after touch: the Pixel was still ringing at 390)
   const NB = Math.round((PRE + POST) / STEP);         // 50 bins
   const binT = Array.from({ length: NB }, (_, i) => -PRE + i * STEP);
   const MAX_TAPS = 300;
@@ -102,8 +112,9 @@
   const ui = {
     start: $('startBtn'), reset: $('resetBtn'), csv: $('csvBtn'), pad: $('pad'), padText: $('padText'), padSub: $('padSub'),
     count: $('count'), apeak: $('apeak'), gpeak: $('gpeak'), ring: $('ring'), settle: $('settle'), consist: $('consist'), rpp: $('rpp'), gax: $('gax'), aax: $('aax'),
-    status: $('status'), accelPlot: $('accelPlot'), gyroPlot: $('gyroPlot'), ver: $('ver')
+    status: $('status'), accelPlot: $('accelPlot'), gyroPlot: $('gyroPlot'), ver: $('ver'), gripNormal: $('gripNormal'), gripTight: $('gripTight')
   };
+  let grip = 'normal';
   const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
   const C = { grid: css('--grid'), rule: css('--rule'), ink: css('--ink'), ink2: css('--ink-2'), ink3: css('--ink-3'), mark: css('--mark'), muted: css('--muted'), band: css('--band') };
   const FONT = '11px "Avenir Next", "Segoe UI", Roboto, system-ui, sans-serif';
@@ -186,16 +197,31 @@
     // features
     let apk = 0, apkI = i0, gpk = 0;
     for (let i = i0; i < NB; i++) { if (magA[i] > apk) { apk = magA[i]; apkI = i; } if (magG[i] > gpk) gpk = magG[i]; }
-    let settleI = apkI;
-    for (let i = NB - 1; i >= apkI; i--) if (magA[i] > 0.2 * apk) { settleI = i; break; }
-    const settleMs = (settleI - i0) * STEP * 1000;
-    // ring frequency: zero crossings of the dominant gyro axis over 0 to 250 ms after touch-down
+    // settle: time after touch-down when the gyro magnitude has fallen back to within SETTLE_K times its pre-tap level and stays there
+    let preG = 0; for (let i = 0; i < preN; i++) preG += magG[i]; preG /= preN;
+    let gpkI = i0; for (let i = i0; i < NB; i++) if (magG[i] >= gpk) { gpkI = i; break; }
+    const settleThr = Math.max(SETTLE_K * preG, 0.05 * gpk);
+    let settleI = NB, settleSat = true;
+    for (let i = gpkI; i < NB; i++) { let ok = true; for (let j = i; j < Math.min(NB, i + 5); j++) if (magG[j] > settleThr) { ok = false; break; } if (ok) { settleI = i; settleSat = false; break; } }
+    const settleMs = Math.min(settleI, NB - 1 - i0 + i0) === NB ? POST * 1000 : (settleI - i0) * STEP * 1000;
+    // rock frequency: dominant gyro axis over 50 to 400 ms after touch-down, scanned 1 to 15 Hz in 0.1 Hz steps with a Hann window; null when no clear peak
     let dom = 0, domVar = -1;
     for (let ax = 0; ax < 3; ax++) { let v = 0; for (let i = i0; i < NB; i++) v += G[ax][i] * G[ax][i]; if (v > domVar) { domVar = v; dom = ax; } }
-    const iEnd = i0 + Math.round(0.25 / STEP);
-    let zc = 0;
-    for (let i = i0 + 1; i < iEnd; i++) if ((G[dom][i] >= 0) !== (G[dom][i - 1] >= 0)) zc++;
-    const ringHz = zc / 2 / 0.25;
+    const iA = i0 + Math.round(0.05 / STEP), iB = i0 + Math.round(0.4 / STEP), L = iB - iA;
+    let mean = 0; for (let i = iA; i < iB; i++) mean += G[dom][i]; mean /= L;
+    const pw = [];
+    for (let f = 1; f <= 15.001; f += 0.1) {
+      let re = 0, im = 0;
+      for (let i = iA; i < iB; i++) { const k = i - iA, w = 0.5 - 0.5 * Math.cos(2 * Math.PI * k / (L - 1)), x = (G[dom][i] - mean) * w, ph = 2 * Math.PI * f * k * STEP; re += x * Math.cos(ph); im -= x * Math.sin(ph); }
+      pw.push([f, re * re + im * im]);
+    }
+    let best = 0; for (let k = 1; k < pw.length - 1; k++) if (pw[k][1] > pw[best][1]) best = k;
+    const sortedPw = pw.map(x => x[1]).sort((a, b) => a - b), medPw = sortedPw[Math.floor(sortedPw.length / 2)];
+    let ringHz = null;
+    if (best > 0 && best < pw.length - 1 && pw[best][1] > 3 * medPw && pw[best][1] > pw[best - 1][1] && pw[best][1] > pw[best + 1][1]) {
+      const y0 = pw[best - 1][1], y1 = pw[best][1], y2 = pw[best + 1][1], den = y0 - 2 * y1 + y2;
+      ringHz = pw[best][0] + (den !== 0 ? 0.1 * 0.5 * (y0 - y2) / den : 0);
+    }
     // which axes carry the response in the first 150 ms (grip signature)
     const iE = i0 + Math.round(0.15 / STEP);
     const share = ch => { const e = ch.map(ax => { let v = 0; for (let i = i0; i < iE; i++) v += ax[i] * ax[i]; return v; }); const tot = e[0] + e[1] + e[2] || 1; return e.map(v => v / tot); };
@@ -206,7 +232,7 @@
     const tap = {
       t0: rec.t0, x: rec.x, y: rec.y, radius: rec.radius, force: rec.force,
       dwellMs: rec.tUp !== null ? (rec.tUp - rec.t0) * 1000 : null,
-      A, G, magA, magG, apk, gpk, settleMs, ringHz, consist, aShare, gShare
+      A, G, magA, magG, apk, gpk, settleMs, settleSat, preG, ringHz, consist, aShare, gShare
     };
     taps.push(tap);
     if (taps.length > MAX_TAPS) taps.shift();
@@ -242,8 +268,10 @@
     const [cm] = meanSd(taps.slice(-10).map(t => t.consist));
     ui.apeak.textContent = n ? am.toFixed(2) + (n > 1 ? ' ±' + asd.toFixed(2) : '') : '';
     ui.gpeak.textContent = n ? gm.toFixed(1) : '';
-    ui.ring.textContent = n ? rm.toFixed(1) : '';
-    ui.settle.textContent = n ? Math.round(sm) : '';
+    const found = taps.filter(t => t.ringHz != null).length;
+    ui.ring.textContent = n ? (isFinite(rm) ? rm.toFixed(1) + ' (' + found + '/' + n + ')' : 'none') : '';
+    const sat = taps.filter(t => t.settleSat).length;
+    ui.settle.textContent = n ? (sat > n / 2 ? '>' + Math.round(POST * 1000) + ' (' + sat + '/' + n + ')' : Math.round(sm) + (sat ? ' (' + sat + ' unsettled)' : '')) : '';
     ui.consist.textContent = isFinite(cm) ? cm.toFixed(2) : '';
     const [rp] = meanSd(taps.map(t => t.apk > 0.05 ? t.gpk / t.apk : null));
     ui.rpp.textContent = isFinite(rp) ? rp.toFixed(0) : '';
@@ -333,7 +361,7 @@
   }
   function saveCsv() {
     if (!taps.length) return;
-    const rows = ['tap,t0_s,bin_ms,ax,ay,az,gx,gy,gz,mag_a,mag_g,x_frac,y_frac,radius,force,dwell_ms,apk,gpk,settle_ms,rock_hz,consist,a_share_x,a_share_y,a_share_z,g_share_x,g_share_y,g_share_z'];
+    const rows = ['tap,t0_s,bin_ms,ax,ay,az,gx,gy,gz,mag_a,mag_g,x_frac,y_frac,radius,force,dwell_ms,apk,gpk,settle_ms,rock_hz,consist,a_share_x,a_share_y,a_share_z,g_share_x,g_share_y,g_share_z,settle_saturated,pre_gyro_degs,grip'];
     taps.forEach((t, k) => {
       for (let i = 0; i < NB; i++) {
         rows.push([k + 1, t.t0.toFixed(3), Math.round(binT[i] * 1000),
@@ -341,13 +369,14 @@
           t.G[0][i].toFixed(4), t.G[1][i].toFixed(4), t.G[2][i].toFixed(4),
           t.magA[i].toFixed(4), t.magG[i].toFixed(4),
           t.x.toFixed(3), t.y.toFixed(3), t.radius != null ? t.radius.toFixed(2) : '', t.force != null ? t.force.toFixed(3) : '',
-          t.dwellMs != null ? Math.round(t.dwellMs) : '', t.apk.toFixed(4), t.gpk.toFixed(4), Math.round(t.settleMs), t.ringHz.toFixed(2),
-          t.consist != null ? t.consist.toFixed(3) : '', ...t.aShare.map(v => v.toFixed(3)), ...t.gShare.map(v => v.toFixed(3))].join(','));
+          t.dwellMs != null ? Math.round(t.dwellMs) : '', t.apk.toFixed(4), t.gpk.toFixed(4), Math.round(t.settleMs), t.ringHz != null ? t.ringHz.toFixed(2) : '',
+          t.consist != null ? t.consist.toFixed(3) : '', ...t.aShare.map(v => v.toFixed(3)), ...t.gShare.map(v => v.toFixed(3)), t.settleSat ? 1 : 0, t.preG.toFixed(3), grip].join(','));
       }
     });
+    rows.push('# window_post_ms,' + Math.round(POST * 1000) + ',settle_rule,gyro_within_' + SETTLE_K + 'x_pretap,grip,' + grip);
     const blob = new Blob([rows.join('\n')], { type: 'text/csv' });
     const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob); a.download = 'taprecoil_v' + VERSION + '_' + taps.length + 'taps.csv';
+    a.href = URL.createObjectURL(blob); a.download = 'taprecoil_v' + VERSION + '_' + grip + '_' + taps.length + 'taps.csv';
     document.body.appendChild(a); a.click(); a.remove();
     setTimeout(() => URL.revokeObjectURL(a.href), 2000);
   }
@@ -355,6 +384,9 @@
   ui.start.addEventListener('click', start);
   ui.reset.addEventListener('click', reset);
   ui.csv.addEventListener('click', saveCsv);
+  const setGrip = g => { grip = g; ui.gripNormal.setAttribute('aria-pressed', String(g === 'normal')); ui.gripTight.setAttribute('aria-pressed', String(g === 'tight')); status('Grip: ' + g + '. Reset between grips so each file holds one grip.'); };
+  ui.gripNormal.addEventListener('click', () => setGrip('normal'));
+  ui.gripTight.addEventListener('click', () => setGrip('tight'));
   ui.pad.addEventListener('touchstart', onTouchStart, { passive: false });
   ui.pad.addEventListener('touchend', onTouchEnd, { passive: true });
   ui.pad.addEventListener('touchcancel', onTouchEnd, { passive: true });
