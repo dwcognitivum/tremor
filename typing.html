@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#EEF1F4">
+<title>Typing</title>
+<style>
+  :root {
+    --paper: #EEF1F4; --panel: #F8FAFC; --grid: #DAE1E8; --rule: #B6C1CE;
+    --ink: #14213D; --ink-2: #2F6B9A; --ink-3: #8DA6BF; --band: #F2C56B; --mark: #C8462B; --muted: #5E6B7C;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body {
+    background: var(--paper); color: var(--ink);
+    font-family: "Avenir Next", "Segoe UI", Roboto, system-ui, -apple-system, sans-serif;
+    font-size: 16px; line-height: 1.4;
+    padding: calc(env(safe-area-inset-top) + 18px) 16px calc(env(safe-area-inset-bottom) + 16px);
+    -webkit-text-size-adjust: 100%; overscroll-behavior: none;
+    display: flex; flex-direction: column; gap: 12px;
+  }
+  h1 { font-size: 22px; font-weight: 600; letter-spacing: -0.01em; display: flex; align-items: baseline; gap: 10px; }
+  .ver { font-size: 13px; font-weight: 500; color: var(--muted); }
+  .sub { color: var(--muted); font-size: 14px; margin-top: -6px; }
+  .row { display: flex; gap: 10px; align-items: stretch; }
+  button { font: inherit; border: 0; border-radius: 6px; cursor: pointer; -webkit-tap-highlight-color: transparent; touch-action: manipulation; }
+  button:focus-visible { outline: 2px solid var(--ink-2); outline-offset: 2px; }
+  .primary { flex: 1; background: var(--ink); color: #fff; font-size: 17px; font-weight: 600; padding: 14px 18px; }
+  .secondary { background: transparent; color: var(--ink); border: 1.5px solid var(--rule); padding: 12px 14px; font-size: 15px; }
+  .secondary:disabled { opacity: 0.4; cursor: default; }
+  .conds { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+  .conds button { background: transparent; color: var(--ink); border: 1.5px solid var(--rule); padding: 10px 4px; font-size: 13px; line-height: 1.2; }
+  .conds button[aria-pressed="true"] { background: var(--ink); color: #fff; border-color: var(--ink); }
+  .grip { background: var(--panel); border-left: 5px solid var(--ink); border-radius: 6px; padding: 10px 12px; font-size: 14px; }
+  .task { background: var(--panel); border: 1.5px solid var(--rule); border-radius: 6px; padding: 10px 12px; }
+  .task .target { font-size: 15px; color: var(--muted); }
+  .task .typed { font-size: 19px; min-height: 1.4em; font-variant-ligatures: none; letter-spacing: 0.01em; word-break: break-all; }
+  .task .typed .caret { display: inline-block; width: 2px; height: 1.1em; background: var(--ink); vertical-align: text-bottom; animation: blink 1s steps(1) infinite; }
+  @keyframes blink { 50% { opacity: 0; } }
+  .readings { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+  .reading { border-top: 2px solid var(--ink); padding-top: 5px; }
+  .reading b { display: block; font-size: 17px; font-weight: 600; font-variant-numeric: tabular-nums; line-height: 1.1; min-height: 1.1em; }
+  .reading small { display: block; color: var(--muted); font-size: 11px; margin-top: 2px; }
+  #kb { display: block; width: 100%; height: 56vw; max-height: 300px; touch-action: none; background: #CFD6DE; border-radius: 8px; }
+  #kb.idle { opacity: 0.5; }
+  .status { font-size: 14px; color: var(--muted); min-height: 1.4em; }
+  .note { font-size: 12px; color: var(--muted); }
+</style>
+</head>
+<body>
+<h1>Typing <span class="ver" id="ver"></span></h1>
+<p class="sub">Choose the grip, tap Start, type the sentence on the keyboard below. Typos are fine, keep going. One warm-up line, then the sentence three times.</p>
+
+<div class="row">
+  <button class="primary" id="startBtn">Start</button>
+  <button class="secondary" id="resetBtn" disabled>Reset</button>
+  <button class="secondary" id="csvBtn" disabled>Save CSV</button>
+</div>
+
+<div class="conds" id="conds"></div>
+<div class="grip" id="grip"></div>
+
+<div class="task">
+  <div class="target" id="target"></div>
+  <div class="typed" id="typed"><span class="caret"></span></div>
+</div>
+
+<canvas id="kb" class="idle"></canvas>
+
+<div class="readings">
+  <div class="reading"><b id="keys"></b><small>keys (scored)</small></div>
+  <div class="reading"><b id="kps"></b><small>keys per second</small></div>
+  <div class="reading"><b id="iki"></b><small>key interval, ms</small></div>
+  <div class="reading"><b id="dwell"></b><small>dwell, ms</small></div>
+  <div class="reading"><b id="rpp"></b><small>rotation per push</small></div>
+  <div class="reading"><b id="gax"></b><small>gyro axis share, %</small></div>
+  <div class="reading"><b id="alt"></b><small>rotation sign alternation</small></div>
+  <div class="reading"><b id="trunc"></b><small>windows cut short, %</small></div>
+</div>
+
+<p class="status" id="status"></p>
+<p class="note">The page draws its own keyboard because the system keyboard gives a web page neither touch positions nor touch-down times. Each keystroke records the touch (key, position on the keyboard, down and up times, force and contact size where the browser provides them) and both motion sensors from 50 ms before touch-down to 150 ms after, with the pre-tap level subtracted. If the next key lands before 150 ms the window is cut there and its true length is written. Features come from the first 100 ms so that most windows are complete: accelerometer and gyro peaks, rotation per push, which axes carry the response, the sign of the rotation about the dominant axis (which separates the two thumbs), and the pre-tap gyro level. At 59 samples a second 100 ms is six samples; native capture at 100 to 200 Hz would change this experiment's results more than any other on the index.</p>
+
+<script>
+(() => {
+  const VERSION = 1;
+  const PRE = 0.05, POST = 0.15, STEP = 0.01, FEAT_MS = 100;
+  const SENTENCE = 'the quick brown fox jumps over the lazy dog';
+  const WARM_LINE = 'warm up line';
+  const REPEATS = 3;
+  const CONDITIONS = [
+    ['one_right', 'One hand, right', 'Hold the phone in your right hand and type with your right thumb only. The phone rests in the fingers of that hand.'],
+    ['one_left', 'One hand, left', 'Hold the phone in your left hand and type with your left thumb only.'],
+    ['two_thumbs', 'Two thumbs', 'Hold the phone with both hands and type with both thumbs, as you normally would.'],
+    ['cradle_right', 'Cradle, right finger', 'Hold the phone in your left hand and type with your right index finger or thumb, the other hand only holding.'],
+  ];
+  const ROWS = ['qwertyuiop', 'asdfghjkl', 'zxcvbnm'];
+
+  const $ = id => document.getElementById(id);
+  const ui = { start: $('startBtn'), reset: $('resetBtn'), csv: $('csvBtn'), conds: $('conds'), grip: $('grip'), target: $('target'), typed: $('typed'), kb: $('kb'),
+    keys: $('keys'), kps: $('kps'), iki: $('iki'), dwell: $('dwell'), rpp: $('rpp'), gax: $('gax'), alt: $('alt'), trunc: $('trunc'), status: $('status'), ver: $('ver') };
+  const status = m => { ui.status.textContent = m; };
+  const ts = e => ((e.timeStamp && e.timeStamp < 1e12) ? e.timeStamp : performance.now()) / 1000;
+
+  let running = false, gotEvents = false, noEventTimer = null, wakeLock = null;
+  let condition = 'one_right';
+  const buf = [];
+  let keys = [];                 // completed keystroke records
+  let active = new Map();        // touch identifier -> keystroke record awaiting touch-up
+  let pendingWindow = [];        // records awaiting their window
+  let text = '', sentenceIdx = 0, lastDownT = null, keyIndex = 0;
+  let layout = null;
+
+  // ---------- keyboard geometry ----------
+  function buildLayout() {
+    const W = ui.kb.clientWidth, H = ui.kb.clientHeight;
+    const rowH = H / 4, kw = W / 10, gap = 3, kh = rowH - gap * 2;
+    const L = [];
+    ROWS.forEach((r, ri) => {
+      const offset = ri === 1 ? kw / 2 : ri === 2 ? kw * 1.5 : 0;
+      [...r].forEach((ch, ci) => L.push({ key: ch, row: ri, col: ci, x: offset + ci * kw + gap, y: ri * rowH + gap, w: kw - gap * 2, h: kh }));
+    });
+    L.push({ key: 'backspace', row: 2, col: 7, x: 8.5 * kw + gap, y: 2 * rowH + gap, w: 1.5 * kw - gap * 2, h: kh });
+    L.push({ key: 'space', row: 3, col: 0, x: 2.5 * kw + gap, y: 3 * rowH + gap, w: 5 * kw - gap * 2, h: kh });
+    layout = { W, H, keys: L };
+  }
+  function hitKey(x, y) {
+    if (!layout) buildLayout();
+    for (const k of layout.keys) if (x >= k.x && x <= k.x + k.w && y >= k.y && y <= k.y + k.h) return k;
+    // nearest key by centre for touches that land in the gaps
+    let best = null, bd = Infinity;
+    for (const k of layout.keys) { const d = Math.hypot(x - (k.x + k.w / 2), y - (k.y + k.h / 2)); if (d < bd) { bd = d; best = k; } }
+    return bd < 30 ? best : null;
+  }
+  function drawKb(pressed) {
+    if (!layout) buildLayout();
+    const dpr = window.devicePixelRatio || 1, c = ui.kb;
+    const W = Math.round(layout.W * dpr), H = Math.round(layout.H * dpr);
+    if (c.width !== W || c.height !== H) { c.width = W; c.height = H; }
+    const ctx = c.getContext('2d'); ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.clearRect(0, 0, layout.W, layout.H);
+    for (const k of layout.keys) {
+      const isP = pressed && pressed.has(k.key);
+      ctx.fillStyle = isP ? '#14213D' : (k.key === 'backspace' || k.key === 'space') ? '#B6C1CE' : '#FFFFFF';
+      ctx.beginPath(); roundRect(ctx, k.x, k.y, k.w, k.h, 6); ctx.fill();
+      ctx.fillStyle = isP ? '#fff' : '#14213D'; ctx.font = (k.key.length > 1 ? '13px' : '20px') + ' "Avenir Next", "Segoe UI", Roboto, system-ui, sans-serif';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText(k.key === 'backspace' ? 'del' : k.key === 'space' ? 'space' : k.key, k.x + k.w / 2, k.y + k.h / 2);
+    }
+  }
+  function roundRect(ctx, x, y, w, h, r) { ctx.moveTo(x + r, y); ctx.lineTo(x + w - r, y); ctx.quadraticCurveTo(x + w, y, x + w, y + r); ctx.lineTo(x + w, y + h - r); ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h); ctx.lineTo(x + r, y + h); ctx.quadraticCurveTo(x, y + h, x, y + h - r); ctx.lineTo(x, y + r); ctx.quadraticCurveTo(x, y, x + r, y); }
+
+  // ---------- motion ----------
+  function onMotion(e) {
+    const t = ts(e), r = e.rotationRate, a = e.acceleration;
+    if (!a || a.x == null) return;
+    gotEvents = true;
+    buf.push({ t, a: [a.x, a.y, a.z], g: (r && r.alpha != null) ? [r.alpha, r.beta, r.gamma] : [0, 0, 0] });
+    while (buf.length && buf[0].t < t - 3) buf.shift();
+  }
+
+  // ---------- task ----------
+  function currentTarget() { return sentenceIdx === 0 ? WARM_LINE : SENTENCE; }
+  function renderTask() {
+    const done = sentenceIdx > REPEATS;
+    ui.target.textContent = done ? 'Done. Save CSV, or Reset for another grip.' : (sentenceIdx === 0 ? 'Warm-up: ' : 'Sentence ' + sentenceIdx + ' of ' + REPEATS + ': ') + currentTarget();
+    ui.typed.innerHTML = ''; ui.typed.textContent = text; if (!done) { const c = document.createElement('span'); c.className = 'caret'; ui.typed.appendChild(c); }
+  }
+  function commitKey(k) {
+    if (k.key === 'backspace') text = text.slice(0, -1);
+    else if (k.key === 'space') text += ' ';
+    else text += k.key;
+    if (text.length >= currentTarget().length) { sentenceIdx++; text = ''; status(sentenceIdx > REPEATS ? 'All sentences done for ' + condition + '. Save CSV.' : 'Next line.'); }
+    renderTask();
+  }
+
+  // ---------- touch on the keyboard ----------
+  const pressed = new Set();
+  function kbXY(touch) { const r = ui.kb.getBoundingClientRect(); return [touch.clientX - r.left, touch.clientY - r.top]; }
+  function onDown(e) {
+    if (!running) { status('Tap Start first.'); return; }
+    e.preventDefault();
+    if (sentenceIdx > REPEATS) return;
+    for (const touch of e.changedTouches || [e]) {
+      const [x, y] = kbXY(touch); const k = hitKey(x, y); if (!k) continue;
+      const t = ts(e);
+      const rec = { id: touch.identifier != null ? touch.identifier : 'm', keyIndex: ++keyIndex, sentence: sentenceIdx, warmup: sentenceIdx === 0 ? 1 : 0, condition,
+        key: k.key, row: k.row, col: k.col, xf: x / layout.W, yf: y / layout.H,
+        zoneX: Math.min(2, Math.floor(3 * x / layout.W)), zoneY: y < layout.H / 2 ? 0 : 1,
+        tDown: t, tUp: null, iki: lastDownT !== null ? (t - lastDownT) * 1000 : null,
+        force: touch.force != null ? touch.force : null, radius: touch.radiusX != null ? Math.max(touch.radiusX, touch.radiusY || 0) : null };
+      lastDownT = t;
+      for (const p of pendingWindow) if (p.nextDown == null) p.nextDown = t;   // earlier windows are cut at this touch-down
+      active.set(rec.id, rec); pendingWindow.push(rec);
+      pressed.add(k.key); drawKb(pressed);
+      commitKey(k);
+      setTimeout(() => finishKey(rec), (POST + 0.08) * 1000);
+    }
+  }
+  function onUp(e) {
+    const t = ts(e);
+    for (const touch of e.changedTouches || [e]) {
+      const id = touch.identifier != null ? touch.identifier : 'm';
+      const rec = active.get(id); if (!rec) continue;
+      rec.tUp = t; active.delete(id); pressed.delete(rec.key);
+    }
+    drawKb(pressed);
+  }
+
+  // ---------- windows and features ----------
+  function interp(samples, key, axis, tq) {
+    let lo = 0, hi = samples.length - 1;
+    if (tq <= samples[0].t) return samples[0][key][axis];
+    if (tq >= samples[hi].t) return samples[hi][key][axis];
+    while (hi - lo > 1) { const mid = (lo + hi) >> 1; if (samples[mid].t <= tq) lo = mid; else hi = mid; }
+    const p = samples[lo], q = samples[hi], w = (tq - p.t) / (q.t - p.t || 1e-9);
+    return p[key][axis] + w * (q[key][axis] - p[key][axis]);
+  }
+  function finishKey(rec) {
+    pendingWindow = pendingWindow.filter(p => p !== rec);
+    const cut = rec.nextDown != null ? Math.min(POST, rec.nextDown - rec.tDown) : POST;
+    const s = buf.filter(x => x.t >= rec.tDown - PRE - 0.05 && x.t <= rec.tDown + cut + 0.05);
+    if (s.length < 4) { rec.dropped = true; keys.push(rec); return; }
+    const nb = Math.round((PRE + cut) / STEP);
+    const A = [[], [], []], G = [[], [], []], T = [];
+    for (let i = 0; i < nb; i++) { const bt = -PRE + i * STEP; T.push(Math.round(bt * 1000)); for (let k = 0; k < 3; k++) { A[k].push(interp(s, 'a', k, rec.tDown + bt)); G[k].push(interp(s, 'g', k, rec.tDown + bt)); } }
+    const preN = Math.round(PRE / STEP);
+    for (const ch of [A, G]) for (const ax of ch) { let m = 0; for (let i = 0; i < preN; i++) m += ax[i]; m /= preN; for (let i = 0; i < ax.length; i++) ax[i] -= m; }
+    const magA = T.map((_, i) => Math.hypot(A[0][i], A[1][i], A[2][i])), magG = T.map((_, i) => Math.hypot(G[0][i], G[1][i], G[2][i]));
+    let preG = 0; { const raw = buf.filter(x => x.t >= rec.tDown - PRE && x.t < rec.tDown); for (const x of raw) preG += Math.hypot(...x.g); preG = raw.length ? preG / raw.length : 0; }
+    const iE = Math.min(nb, preN + Math.round(FEAT_MS / 1000 / STEP));
+    let apk = 0, gpk = 0; for (let i = preN; i < iE; i++) { apk = Math.max(apk, magA[i]); gpk = Math.max(gpk, magG[i]); }
+    const share = ch => { const e = ch.map(ax => { let v = 0; for (let i = preN; i < iE; i++) v += ax[i] * ax[i]; return v; }); const tot = e[0] + e[1] + e[2] || 1; return e.map(v => v / tot); };
+    const aShare = share(A), gShare = share(G);
+    const dom = gShare.indexOf(Math.max(...gShare));
+    let sgn = 0; for (let i = preN; i < iE; i++) sgn += G[dom][i]; const rotSign = sgn >= 0 ? 1 : -1;
+    Object.assign(rec, { T, A, G, magA, magG, truncMs: Math.round(cut * 1000), apk, gpk, rpp: apk > 0.02 ? gpk / apk : null, aShare, gShare, rotSign, preG, dropped: false });
+    keys.push(rec);
+    ui.csv.disabled = false; ui.reset.disabled = false;
+    updateReadings();
+  }
+  const med = a => { const v = a.filter(x => x != null && isFinite(x)).sort((p, q) => p - q); return v.length ? v[Math.floor(v.length / 2)] : NaN; };
+  const mean = a => { const v = a.filter(x => x != null && isFinite(x)); return v.length ? v.reduce((s, x) => s + x, 0) / v.length : NaN; };
+  function updateReadings() {
+    const scored = keys.filter(k => !k.warmup && !k.dropped);
+    ui.keys.textContent = scored.length;
+    if (!scored.length) return;
+    const bySentence = {}; for (const k of scored) (bySentence[k.sentence] = bySentence[k.sentence] || []).push(k);
+    const rates = Object.values(bySentence).filter(v => v.length > 3).map(v => (v.length - 1) / (v[v.length - 1].tDown - v[0].tDown));
+    ui.kps.textContent = rates.length ? mean(rates).toFixed(1) : '';
+    ui.iki.textContent = Math.round(med(scored.map(k => k.iki)));
+    ui.dwell.textContent = Math.round(med(scored.map(k => k.tUp != null ? (k.tUp - k.tDown) * 1000 : null)));
+    ui.rpp.textContent = isFinite(mean(scored.map(k => k.rpp))) ? mean(scored.map(k => k.rpp)).toFixed(0) : '';
+    ui.gax.textContent = [0, 1, 2].map(i => Math.round(100 * mean(scored.map(k => k.gShare[i])))).join('/');
+    let alt = 0, n = 0; for (let i = 1; i < scored.length; i++) { if (scored[i].keyIndex === scored[i - 1].keyIndex + 1) { n++; if (scored[i].rotSign !== scored[i - 1].rotSign) alt++; } }
+    ui.alt.textContent = n ? (alt / n).toFixed(2) : '';
+    ui.trunc.textContent = Math.round(100 * scored.filter(k => k.truncMs < POST * 1000).length / scored.length);
+  }
+
+  // ---------- controls ----------
+  function setCondition(id) {
+    condition = id;
+    for (const b of ui.conds.children) b.setAttribute('aria-pressed', String(b.dataset.id === id));
+    const c = CONDITIONS.find(x => x[0] === id); ui.grip.textContent = c[2];
+    if (keys.length) { reset(); status('Grip changed to ' + id + '; the log was cleared so each file holds one grip.'); }
+  }
+  async function start() {
+    if (running) { stop(); return; }
+    if (typeof DeviceMotionEvent === 'undefined') { status('This browser does not expose motion sensors.'); return; }
+    if (typeof DeviceMotionEvent.requestPermission === 'function') {
+      try { const r = await DeviceMotionEvent.requestPermission(); if (r !== 'granted') { status('Motion access was refused. Reload and allow it.'); return; } }
+      catch (err) { status('Motion access could not be requested. Open the page over HTTPS.'); return; }
+    }
+    if (!window.isSecureContext) { status('Not on HTTPS, so the browser will not deliver sensor data.'); return; }
+    running = true; gotEvents = false; buf.length = 0;
+    window.addEventListener('devicemotion', onMotion);
+    ui.start.textContent = 'Stop'; ui.kb.classList.remove('idle');
+    buildLayout(); drawKb(); renderTask();
+    status('Live. Type the warm-up line, then the sentence three times.');
+    noEventTimer = setTimeout(() => { if (!gotEvents) status('No motion data is arriving. Check HTTPS and motion access.'); }, 3000);
+    try { if (navigator.wakeLock) wakeLock = await navigator.wakeLock.request('screen'); } catch (err) {}
+  }
+  function stop() {
+    running = false;
+    window.removeEventListener('devicemotion', onMotion);
+    clearTimeout(noEventTimer);
+    ui.start.textContent = 'Start'; ui.kb.classList.add('idle');
+    status('Stopped. ' + keys.filter(k => !k.warmup).length + ' scored keys recorded.');
+    if (wakeLock) { wakeLock.release().catch(() => {}); wakeLock = null; }
+  }
+  function reset() {
+    keys = []; active = new Map(); pendingWindow = []; text = ''; sentenceIdx = 0; lastDownT = null; keyIndex = 0; pressed.clear();
+    for (const k of ['keys', 'kps', 'iki', 'dwell', 'rpp', 'gax', 'alt', 'trunc']) ui[k].textContent = '';
+    ui.csv.disabled = true; ui.reset.disabled = true; renderTask(); if (layout) drawKb();
+  }
+  function csvRows() {
+    const rows = ['key_index,sentence,warmup,condition,key,row,col,zone_x,zone_y,x_frac,y_frac,t_down_s,t_up_s,dwell_ms,iki_ms,bin_ms,ax,ay,az,gx,gy,gz,mag_a,mag_g,truncated_ms,apk,gpk,rpp,g_share_x,g_share_y,g_share_z,a_share_x,a_share_y,a_share_z,rot_sign,pre_gyro_degs,force,radius'];
+    const f = (v, d) => v == null || !isFinite(v) ? '' : v.toFixed(d);
+    for (const k of keys.filter(x => !x.dropped)) {
+      const head = [k.keyIndex, k.sentence, k.warmup, k.condition, k.key, k.row, k.col, k.zoneX, k.zoneY, k.xf.toFixed(3), k.yf.toFixed(3), k.tDown.toFixed(3), k.tUp != null ? k.tUp.toFixed(3) : '', k.tUp != null ? Math.round((k.tUp - k.tDown) * 1000) : '', k.iki != null ? Math.round(k.iki) : ''];
+      const tail = [k.truncMs, f(k.apk, 4), f(k.gpk, 3), f(k.rpp, 2), ...k.gShare.map(v => v.toFixed(3)), ...k.aShare.map(v => v.toFixed(3)), k.rotSign, f(k.preG, 3), f(k.force, 3), f(k.radius, 2)];
+      for (let i = 0; i < k.T.length; i++) rows.push([...head, k.T[i], f(k.A[0][i], 4), f(k.A[1][i], 4), f(k.A[2][i], 4), f(k.G[0][i], 3), f(k.G[1][i], 3), f(k.G[2][i], 3), f(k.magA[i], 4), f(k.magG[i], 3), ...tail].join(','));
+    }
+    rows.push('# window_pre_ms,' + Math.round(PRE * 1000) + ',window_post_ms,' + Math.round(POST * 1000) + ',feature_ms,' + FEAT_MS + ',version,' + VERSION + ',condition,' + condition + ',sentence,' + SENTENCE.replace(/,/g, ' '));
+    return rows;
+  }
+  function saveCsv() {
+    if (!keys.length) return;
+    const rows = csvRows();
+    const blob = new Blob([rows.join('\n')], { type: 'text/csv' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob); a.download = 'typing_v' + VERSION + '_' + condition + '_' + keys.filter(x => !x.dropped).length + 'keys.csv';
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+  }
+  for (const [id, name] of CONDITIONS) {
+    const b = document.createElement('button'); b.textContent = name; b.dataset.id = id; b.setAttribute('aria-pressed', String(id === condition));
+    b.addEventListener('click', () => setCondition(id)); ui.conds.appendChild(b);
+  }
+  ui.grip.textContent = CONDITIONS[0][2];
+  ui.start.addEventListener('click', start);
+  ui.reset.addEventListener('click', () => { reset(); status('Cleared.'); });
+  ui.csv.addEventListener('click', saveCsv);
+  ui.kb.addEventListener('touchstart', onDown, { passive: false });
+  ui.kb.addEventListener('touchend', onUp, { passive: true });
+  ui.kb.addEventListener('touchcancel', onUp, { passive: true });
+  if (!('ontouchstart' in window)) { ui.kb.addEventListener('mousedown', onDown); ui.kb.addEventListener('mouseup', onUp); }
+  window.addEventListener('resize', () => { layout = null; if (running) drawKb(pressed); });
+  ui.ver.textContent = 'v' + VERSION;
+  renderTask();
+  buildLayout(); drawKb();
+})();
+</script>
+</body>
+</html>
