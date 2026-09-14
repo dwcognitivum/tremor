@@ -84,7 +84,7 @@
 
 <script>
 (() => {
-  const VERSION = 2;
+  const VERSION = 3;
   const MIN_DUR = 0.2, VERT_TARGET = 40;
   const PRE = 0.15, POST = 0.3, STEP = 0.01, PROF = 32, MAX_G = 300;
   const DIRS = ['left', 'right', 'up', 'down'];
@@ -102,7 +102,8 @@
   let cur = null;                     // gesture in progress {t0, pts:[[t,x,y]], t1}
   let gestures = [];
   const profiles = { left: [], right: [], up: [], down: [] };   // coupled-rotation profiles per direction
-  let lastG = null, vertical = false, lagStep = 1 / 59;
+  let lastG = null, vertical = false, lagStep = 1 / 59, rafPending = false, liveStroke = null;
+  function requestDraw() { if (rafPending) return; rafPending = true; requestAnimationFrame(() => { rafPending = false; drawPad(); }); }
 
   const ts = e => ((e.timeStamp && e.timeStamp < 1e12) ? e.timeStamp : performance.now()) / 1000;
 
@@ -125,6 +126,7 @@
     const touch = e.changedTouches ? e.changedTouches[0] : e;
     const [x, y] = padXY(touch);
     cur = { t0: ts(e), pts: [[ts(e), x, y]], t1: null };
+    liveStroke = cur.pts; requestDraw();
   }
   function onMove(e) {
     if (!cur) return;
@@ -132,12 +134,14 @@
     const touch = e.changedTouches ? e.changedTouches[0] : e;
     const [x, y] = padXY(touch);
     cur.pts.push([ts(e), x, y]);
+    requestDraw();
   }
   function onUp(e) {
     if (!cur) return;
     const g = cur; cur = null;
     g.t1 = ts(e);
-    setTimeout(() => finish(g), (POST + 0.08) * 1000);
+    liveStroke = g.pts; requestDraw();                       // the path stays on screen while the release window fills
+    setTimeout(() => { finish(g); liveStroke = null; requestDraw(); }, (POST + 0.08) * 1000);
   }
 
   // ---------- analysis ----------
@@ -250,8 +254,17 @@
     const ctx = c.getContext('2d'); ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.clearRect(0, 0, w, h);
     return [ctx, w, h];
   }
+  function drawLive(ctx) {
+    if (!liveStroke || liveStroke.length < 2) return;
+    ctx.strokeStyle = 'rgba(255,255,255,0.9)'; ctx.lineWidth = 3; ctx.lineCap = 'round'; ctx.lineJoin = 'round'; ctx.beginPath();
+    liveStroke.forEach((p, i) => { if (i === 0) ctx.moveTo(p[1], p[2]); else ctx.lineTo(p[1], p[2]); });
+    ctx.stroke();
+    const last = liveStroke[liveStroke.length - 1];
+    ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(last[1], last[2], 6, 0, Math.PI * 2); ctx.fill();
+  }
   function drawPad() {
     const [ctx, w, h] = fitCanvas(ui.pad);
+    if (liveStroke) { drawLive(ctx); return; }
     if (!lastG) {
       ctx.fillStyle = running ? 'rgba(255,255,255,0.8)' : C.ink; ctx.font = '15px "Avenir Next", "Segoe UI", Roboto, system-ui, sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
       ctx.fillText(running ? 'Swipe or scroll here' : 'Tap Start', w / 2, h / 2); return;
