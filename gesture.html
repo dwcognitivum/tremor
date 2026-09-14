@@ -30,6 +30,7 @@
   .primary { flex: 1; background: var(--ink); color: #fff; font-size: 17px; font-weight: 600; padding: 14px 18px; }
   .secondary { background: transparent; color: var(--ink); border: 1.5px solid var(--rule); padding: 12px 14px; font-size: 15px; }
   .secondary:disabled { opacity: 0.4; cursor: default; }
+  .toggle[aria-pressed="true"] { background: var(--ink); color: #fff; border-color: var(--ink); }
   .readings { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
   .reading { border-top: 2px solid var(--ink); padding-top: 6px; }
   .reading b { display: block; font-size: 19px; font-weight: 600; font-variant-numeric: tabular-nums; line-height: 1.1; min-height: 1.1em; }
@@ -52,6 +53,9 @@
   <button class="primary" id="startBtn">Start</button>
   <button class="secondary" id="resetBtn" disabled>Reset</button>
   <button class="secondary" id="csvBtn" disabled>Save CSV</button>
+</div>
+<div class="row">
+  <button class="secondary toggle" id="modeBtn" aria-pressed="false" style="flex:1">All directions</button>
 </div>
 
 <div class="readings">
@@ -76,16 +80,17 @@
 </figure>
 
 <p class="status" id="status"></p>
-<p class="note">Each stroke is recorded with the gyro and accelerometer from 150 ms before touch-down to 300 ms after lift-off, on a shared 10 ms grid. Rotation lag is the delay between finger speed and rotation rate from cross-correlation; negative means the phone starts turning before the thumb moves. Coupled rotation is the rotation about the screen axis perpendicular to the stroke (the axis a hand uses to bring the far side of the screen closer), signed relative to the stroke direction, per 100 px of travel. Twist is rotation about the axis through the screen. Consistency is the correlation of this stroke's rotation profile with the mean profile for the same direction. Distances are in CSS pixels; on this phone 100 px is roughly 1.5 to 2 cm.</p>
+<p class="note">Each stroke is recorded with the gyro and accelerometer from 150 ms before touch-down to 300 ms after lift-off, on a shared 10 ms grid. Rotation lag is the delay between finger speed and rotation rate from cross-correlation, reported in whole sensor samples (about 17 ms at 59 Hz) since that is the real resolution; negative means the phone starts turning before the thumb moves. Strokes shorter than 200 ms are rejected so each has at least 12 samples. Coupled rotation is the rotation about the screen axis perpendicular to the stroke (the axis a hand uses to bring the far side of the screen closer), signed relative to the stroke direction, per 100 px of travel. Twist is rotation about the axis through the screen. Consistency is the correlation of this stroke's rotation profile with the mean profile for the same direction. Distances are in CSS pixels; on this phone 100 px is roughly 1.5 to 2 cm.</p>
 
 <script>
 (() => {
-  const VERSION = 1;
+  const VERSION = 2;
+  const MIN_DUR = 0.2, VERT_TARGET = 40;
   const PRE = 0.15, POST = 0.3, STEP = 0.01, PROF = 32, MAX_G = 300;
   const DIRS = ['left', 'right', 'up', 'down'];
 
   const $ = id => document.getElementById(id);
-  const ui = { start: $('startBtn'), reset: $('resetBtn'), csv: $('csvBtn'), pad: $('pad'), timing: $('timing'), status: $('status'), ver: $('ver'),
+  const ui = { start: $('startBtn'), reset: $('resetBtn'), csv: $('csvBtn'), mode: $('modeBtn'), pad: $('pad'), timing: $('timing'), status: $('status'), ver: $('ver'),
     last: $('last'), lag: $('lag'), coupled: $('coupled'), twist: $('twist'), pre: $('pre'), release: $('release'), speed: $('speed'), consist: $('consist'), counts: $('counts') };
   const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
   const C = { grid: css('--grid'), rule: css('--rule'), ink: css('--ink'), ink2: css('--ink-2'), ink3: css('--ink-3'), mark: css('--mark'), muted: css('--muted'), band: css('--band') };
@@ -97,7 +102,7 @@
   let cur = null;                     // gesture in progress {t0, pts:[[t,x,y]], t1}
   let gestures = [];
   const profiles = { left: [], right: [], up: [], down: [] };   // coupled-rotation profiles per direction
-  let lastG = null;
+  let lastG = null, vertical = false, lagStep = 1 / 59;
 
   const ts = e => ((e.timeStamp && e.timeStamp < 1e12) ? e.timeStamp : performance.now()) / 1000;
 
@@ -164,10 +169,15 @@
     const dur = g.t1 - g.t0;
     const dx = g.pts[g.pts.length - 1][1] - g.pts[0][1], dy = g.pts[g.pts.length - 1][2] - g.pts[0][2];
     const len = Math.hypot(dx, dy);
-    if (g.pts.length < 4 || len < 40 || dur < 0.05) { status('That was a tap or too short; make a longer stroke.'); return; }
+    if (g.pts.length < 4 || len < 40) { status('That was a tap or too short; make a longer stroke.'); return; }
+    if (dur < MIN_DUR) { status('Too quick. Make the stroke last at least 200 ms; repeat it.'); return; }
     const s = buf.filter(x => x.t >= g.t0 - PRE - 0.05 && x.t <= g.t1 + POST + 0.05);
     if (s.length < 10) { status('Not enough motion samples around that stroke.'); return; }
     const dir = Math.abs(dx) > Math.abs(dy) ? (dx > 0 ? 'right' : 'left') : (dy > 0 ? 'down' : 'up');
+    if (vertical && (dir === 'left' || dir === 'right')) { status('Vertical only: scroll up or down; that stroke was not saved.'); return; }
+    // native sensor spacing, so the lag is reported in whole sensor samples rather than in 10 ms steps
+    const ivs = []; for (let i = 1; i < s.length; i++) ivs.push(s[i].t - s[i - 1].t); ivs.sort((a, b) => a - b);
+    lagStep = ivs[Math.floor(ivs.length / 2)] || lagStep;
     const horizontal = dir === 'left' || dir === 'right';
     const sign = (dir === 'right' || dir === 'down') ? 1 : -1;
     // shared 10 ms grid from PRE before touch-down to POST after lift-off
@@ -182,13 +192,15 @@
     for (let i = 0; i < N; i++) { const j = Math.max(0, i - 1); SP.push(Math.hypot(X[i] - X[j], Y[i] - Y[j]) / STEP); }
     const GM = G[0].map((_, i) => Math.hypot(G[0][i], G[1][i], G[2][i]));
     // lag between finger speed and rotation rate, over the stroke plus margins
-    let bestLag = 0, bestC = -2;
+    let bestK = 0, bestC = -2;
     const i0 = Math.round(PRE / STEP), i1 = Math.round((PRE + dur) / STEP);
-    for (let L = -20; L <= 20; L++) {
-      const a = [], b = [];
+    const kMax = Math.max(1, Math.round(0.2 / lagStep));
+    for (let k = -kMax; k <= kMax; k++) {
+      const L = Math.round(k * lagStep / STEP), a = [], b = [];
       for (let i = i0; i <= i1; i++) { const j = i + L; if (j >= 0 && j < N) { a.push(SP[i]); b.push(GM[j]); } }
-      if (a.length > 5) { const c = corr(a, b); if (c > bestC) { bestC = c; bestLag = L; } }
+      if (a.length > 5) { const c = corr(a, b); if (c > bestC) { bestC = c; bestK = k; } }
     }
+    const bestLag = bestK * lagStep / STEP;
     // coupled axis: horizontal stroke pairs with rotation about the device y axis (gamma), vertical with x axis (beta); twist is alpha (about z)
     const coupledIdx = horizontal ? 2 : 1, crossIdx = horizontal ? 1 : 2;
     const per100 = 100 / len;
@@ -205,7 +217,7 @@
     let consist = null;
     if (others.length >= 2) { const mean = new Float32Array(PROF); for (const p of others) for (let b = 0; b < PROF; b++) mean[b] += p[b] / others.length; consist = corr(prof, mean); }
     others.push(prof); if (others.length > 60) others.shift();
-    const rec = { t0: g.t0, dir, dur, len, peakSp, lag: bestLag * STEP * 1000, lagC: bestC, coupled, cross, twist, pre, rel, decelFrac, consist, T, X, Y, SP, G, A, ANG, GM, i0, i1 };
+    const rec = { t0: g.t0, dir, dur, len, peakSp, lag: bestK * lagStep * 1000, lagStepMs: lagStep * 1000, lagC: bestC, coupled, cross, twist, pre, rel, decelFrac, consist, T, X, Y, SP, G, A, ANG, GM, i0, i1 };
     gestures.push(rec); if (gestures.length > MAX_G) gestures.shift();
     lastG = rec;
     ui.csv.disabled = false; ui.reset.disabled = false;
@@ -224,6 +236,10 @@
     const cm = meanOf(same.slice(-10).map(g => g.consist));
     ui.consist.textContent = isFinite(cm) ? cm.toFixed(2) : '';
     ui.counts.textContent = DIRS.map(d => gestures.filter(g => g.dir === d).length).join('/');
+    if (vertical) {
+      const up = gestures.filter(g => g.dir === 'up').length, down = gestures.filter(g => g.dir === 'down').length;
+      status((up >= VERT_TARGET && down >= VERT_TARGET) ? 'Vertical set complete: ' + up + ' up, ' + down + ' down. Save CSV.' : 'Vertical only: up ' + Math.min(up, VERT_TARGET) + ' of ' + VERT_TARGET + ', down ' + Math.min(down, VERT_TARGET) + ' of ' + VERT_TARGET);
+    }
   }
 
   // ---------- drawing ----------
@@ -308,12 +324,12 @@
   }
   function saveCsv() {
     if (!gestures.length) return;
-    const rows = ['gesture,dir,t0_s,t_ms,x_px,y_px,speed_pxs,gx,gy,gz,ax,ay,az,ang_x,ang_y,ang_z,dur_ms,len_px,peak_speed,lag_ms,lag_match,coupled_deg_per100,cross_deg_per100,twist_deg_per100,pre_deg,release_deg,decel_frac,consist'];
+    const rows = ['gesture,dir,t0_s,t_ms,x_px,y_px,speed_pxs,gx,gy,gz,ax,ay,az,ang_x,ang_y,ang_z,dur_ms,len_px,peak_speed,lag_ms,lag_match,coupled_deg_per100,cross_deg_per100,twist_deg_per100,pre_deg,release_deg,decel_frac,consist,lag_step_ms'];
     gestures.forEach((g, k) => {
       for (let i = 0; i < g.T.length; i++) rows.push([k + 1, g.dir, g.t0.toFixed(3), Math.round(g.T[i] * 1000), g.X[i].toFixed(1), g.Y[i].toFixed(1), g.SP[i].toFixed(0),
         g.G[0][i].toFixed(3), g.G[1][i].toFixed(3), g.G[2][i].toFixed(3), g.A[0][i].toFixed(4), g.A[1][i].toFixed(4), g.A[2][i].toFixed(4),
         g.ANG[0][i].toFixed(3), g.ANG[1][i].toFixed(3), g.ANG[2][i].toFixed(3),
-        Math.round(g.dur * 1000), g.len.toFixed(0), g.peakSp.toFixed(0), g.lag.toFixed(0), g.lagC.toFixed(3), g.coupled.toFixed(3), g.cross.toFixed(3), g.twist.toFixed(3), g.pre.toFixed(3), g.rel.toFixed(3), g.decelFrac.toFixed(3), g.consist != null ? g.consist.toFixed(3) : ''].join(','));
+        Math.round(g.dur * 1000), g.len.toFixed(0), g.peakSp.toFixed(0), g.lag.toFixed(0), g.lagC.toFixed(3), g.coupled.toFixed(3), g.cross.toFixed(3), g.twist.toFixed(3), g.pre.toFixed(3), g.rel.toFixed(3), g.decelFrac.toFixed(3), g.consist != null ? g.consist.toFixed(3) : '', g.lagStepMs.toFixed(1)].join(','));
     });
     const blob = new Blob([rows.join('\n')], { type: 'text/csv' });
     const a = document.createElement('a');
@@ -324,6 +340,7 @@
   ui.start.addEventListener('click', start);
   ui.reset.addEventListener('click', reset);
   ui.csv.addEventListener('click', saveCsv);
+  ui.mode.addEventListener('click', () => { vertical = !vertical; ui.mode.setAttribute('aria-pressed', String(vertical)); ui.mode.textContent = vertical ? 'Vertical only: 40 up, 40 down' : 'All directions'; status(vertical ? 'Vertical only: scroll up and down, 40 each.' : 'All directions.'); });
   ui.pad.addEventListener('touchstart', onDown, { passive: false });
   ui.pad.addEventListener('touchmove', onMove, { passive: false });
   ui.pad.addEventListener('touchend', onUp, { passive: true });
