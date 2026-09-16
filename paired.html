@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#EEF1F4">
+<title>Paired session</title>
+<style>
+  :root {
+    --paper: #EEF1F4; --panel: #F8FAFC; --grid: #DAE1E8; --rule: #B6C1CE;
+    --ink: #14213D; --ink-2: #2F6B9A; --ink-3: #8DA6BF; --band: #F2C56B; --mark: #C8462B; --muted: #5E6B7C;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body {
+    background: var(--paper); color: var(--ink);
+    font-family: "Avenir Next", "Segoe UI", Roboto, system-ui, -apple-system, sans-serif;
+    font-size: 16px; line-height: 1.4;
+    padding: calc(env(safe-area-inset-top) + 16px) 16px calc(env(safe-area-inset-bottom) + 16px);
+    -webkit-text-size-adjust: 100%; overscroll-behavior: none;
+    display: flex; flex-direction: column; gap: 12px;
+  }
+  h1 { font-size: 22px; font-weight: 600; letter-spacing: -0.01em; display: flex; align-items: baseline; gap: 10px; }
+  .ver { font-size: 13px; font-weight: 500; color: var(--muted); }
+  .sub { color: var(--muted); font-size: 14px; margin-top: -6px; }
+  .row { display: flex; gap: 10px; align-items: stretch; }
+  button { font: inherit; border: 0; border-radius: 6px; cursor: pointer; -webkit-tap-highlight-color: transparent; touch-action: manipulation; }
+  .primary { flex: 1; background: var(--ink); color: #fff; font-size: 17px; font-weight: 600; padding: 14px 18px; }
+  .primary:disabled { opacity: 0.5; }
+  .secondary { background: transparent; color: var(--ink); border: 1.5px solid var(--rule); padding: 12px 14px; font-size: 15px; }
+  .secondary:disabled { opacity: 0.4; cursor: default; }
+  label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 4px; }
+  input[type=text], input[type=number] { font: inherit; width: 100%; padding: 10px 12px; border: 1.5px solid var(--rule); border-radius: 6px; background: var(--panel); color: var(--ink); }
+  .opts { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; }
+  .opts button { background: transparent; color: var(--ink); border: 1.5px solid var(--rule); padding: 10px 6px; font-size: 14px; line-height: 1.2; }
+  .opts button[aria-pressed="true"] { background: var(--ink); color: #fff; border-color: var(--ink); }
+  .hint { background: var(--panel); border-left: 5px solid var(--ink); border-radius: 6px; padding: 10px 12px; font-size: 14px; }
+  .check { display: flex; align-items: center; gap: 10px; font-size: 15px; }
+  .banner { border-radius: 8px; padding: 14px 16px; color: #fff; background: #5E6B7C; }
+  .banner b { display: block; font-size: 20px; font-weight: 600; line-height: 1.15; }
+  .banner span { display: block; font-size: 14px; opacity: 0.9; margin-top: 4px; }
+  .big { font-size: 44px; font-weight: 600; text-align: center; line-height: 1.1; }
+  .task { background: var(--panel); border: 1.5px solid var(--rule); border-radius: 6px; padding: 10px 12px; }
+  .task .target { font-size: 15px; color: var(--muted); }
+  .task .typed { font-size: 19px; min-height: 1.4em; word-break: break-all; }
+  #kb { display: block; width: 100%; height: 56vw; max-height: 300px; touch-action: none; background: #CFD6DE; border-radius: 8px; }
+  #article { height: 58vh; overflow-y: auto; -webkit-overflow-scrolling: touch; background: var(--panel); border: 1.5px solid var(--rule); border-radius: 6px; padding: 14px 16px; font-size: 16px; line-height: 1.55; }
+  #article h2 { font-size: 17px; margin: 18px 0 6px; }
+  #article p { margin-bottom: 12px; color: #2B3A55; }
+  #cards { height: 44vh; min-height: 300px; border-radius: 8px; background: var(--ink); color: #fff; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; touch-action: none; user-select: none; -webkit-user-select: none; }
+  #cards .arrow { font-size: 64px; line-height: 1; }
+  #cards .cnt { font-size: 14px; opacity: 0.85; }
+  .status { font-size: 14px; color: var(--muted); min-height: 1.4em; }
+  .note { font-size: 12px; color: var(--muted); }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+<h1>Paired session <span class="ver" id="ver"></span></h1>
+
+<div id="setup">
+  <p class="sub">About nine minutes. Seated first, then the same tasks while walking. The page runs the sequence; follow the instructions on screen. Sit somewhere you can walk from.</p>
+  <div class="row" style="margin-top:10px">
+    <div style="flex:2"><label>Person code (no names)</label><input type="text" id="person" placeholder="e.g. p07" autocapitalize="off" autocomplete="off"></div>
+    <div style="flex:1"><label>Session</label><input type="number" id="session" value="1" min="1"></div>
+  </div>
+  <div style="margin-top:10px"><label>Grip for typing (your own natural grip)</label><div class="opts" id="grips"></div><div class="hint" id="gripHint" style="margin-top:8px"></div></div>
+  <div style="margin-top:10px"><label>Hand for swiping and scrolling</label><div class="opts" id="hands"></div></div>
+  <div class="check" style="margin-top:12px"><input type="checkbox" id="standing"><label for="standing" style="margin:0;font-size:15px;color:var(--ink)">Add a standing block after walking (optional)</label></div>
+  <div class="row" style="margin-top:12px"><button class="primary" id="startBtn">Start session</button></div>
+</div>
+
+<div id="run" class="hidden">
+  <div class="banner" id="banner"><b id="phaseName"></b><span id="phaseSub"></span></div>
+  <div class="big hidden" id="countdown"></div>
+  <div id="stillBox" class="hidden"><div class="big" id="stillTimer"></div><p class="sub" style="text-align:center;margin-top:8px" id="stillText"></p></div>
+  <div id="typeBox" class="hidden">
+    <div class="task"><div class="target" id="target"></div><div class="typed" id="typed"></div></div>
+    <canvas id="kb" style="margin-top:10px"></canvas>
+  </div>
+  <div id="scrollBox" class="hidden"><div id="article" data-target="article"></div></div>
+  <div id="swipeBox" class="hidden"><div id="cards" data-target="card"><div class="arrow" id="arrow"></div><div id="cardPrompt"></div><div class="cnt" id="cardCount"></div></div></div>
+  <div class="row" style="margin-top:10px"><button class="secondary" id="skipBtn" style="flex:1">Skip phase</button><button class="secondary" id="abortBtn" style="flex:1">Stop and save</button></div>
+</div>
+
+<div id="done" class="hidden">
+  <div class="banner" style="background:#2E8B57"><b>Session complete</b><span id="doneSub"></span></div>
+  <div class="row" style="margin-top:12px"><button class="primary" id="saveBtn">Save both files</button></div>
+  <p class="status" id="saveStatus"></p>
+</div>
+
+<p class="status" id="status"></p>
+<p class="note">One continuous motion stream for the whole session, every sample with its own timestamp, and every pointer, key and scroll event on the same clock, with the page stamping the start and end of each phase. Nothing is computed here; the two files (imu and events, each ending with a JSON meta line) are cut later by the toolkit. Needs HTTPS and motion access. Keep the screen awake.</p>
+
+<script>
+(() => {
+  const VERSION = 1;
+  const SENTENCE = 'the quick brown fox jumps over the lazy dog';
+  const REPEATS = 3, STILL_S = 30, SCROLL_S = 60, SWIPES = 40, TYPE_MAX_S = 180, SWIPE_MAX_S = 120, COUNTDOWN_S = 3, GAP_MS = 250;
+  const GRIPS = [['one_right', 'One hand, right thumb', 'Hold the phone in your right hand and type with your right thumb.'], ['one_left', 'One hand, left thumb', 'Hold the phone in your left hand and type with your left thumb.'],
+    ['two_thumbs', 'Two thumbs', 'Hold with both hands and type with both thumbs.'], ['cradle_right', 'Cradle, right finger', 'Left hand holds, right index finger or thumb types.']];
+  const HANDS = [['right_thumb', 'Right thumb'], ['left_thumb', 'Left thumb'], ['right_index', 'Right index'], ['left_index', 'Left index']];
+  const ROWS = ['qwertyuiop', 'asdfghjkl', 'zxcvbnm'];
+
+  const $ = id => document.getElementById(id);
+  const ui = {};
+  for (const id of ['setup', 'run', 'done', 'person', 'session', 'grips', 'gripHint', 'hands', 'standing', 'startBtn', 'banner', 'phaseName', 'phaseSub', 'countdown', 'stillBox', 'stillTimer', 'stillText', 'typeBox', 'target', 'typed', 'kb', 'scrollBox', 'article', 'swipeBox', 'cards', 'arrow', 'cardPrompt', 'cardCount', 'skipBtn', 'abortBtn', 'saveBtn', 'saveStatus', 'status', 'ver', 'doneSub']) ui[id] = $(id);
+  const status = m => { ui.status.textContent = m; };
+  const nowMs = e => (e && e.timeStamp && e.timeStamp < 1e12) ? e.timeStamp : performance.now();
+
+  // ---------- state ----------
+  let grip = 'one_right', hand = 'right_thumb', running = false, wakeLock = null;
+  const imu = [];            // [t_ms, ax, ay, az, gx, gy, gz]
+  const events = [];         // rows for events.csv
+  let phase = '', posture = '', lastImuT = null, motionCount = 0, stillRateSamples = [];
+  const counts = { taps: 0, keys: 0, strokes: 0, gaps: 0 };
+  const phaseDurations = {};
+  let seq = [], seqIdx = -1, phaseTimer = null, tickTimer = null, phaseStartT = 0;
+  let text = '', sentenceIdx = 0, swipeCount = 0, swipeDir = 'left', strokeStart = null;
+  let layout = null; const pressed = new Set();
+
+  function ev(kind, e, extra) {
+    const t = e ? nowMs(e) : performance.now();
+    events.push({ t_ms: t, phase, posture, kind, ...(extra || {}) });
+  }
+
+  // ---------- IMU ----------
+  function onMotion(e) {
+    const a = e.acceleration, r = e.rotationRate;
+    if (!a || a.x == null) return;
+    const t = nowMs(e);
+    if (lastImuT !== null && t - lastImuT > GAP_MS) { counts.gaps++; ev('gap', e, { key: Math.round(t - lastImuT) }); }
+    lastImuT = t; motionCount++;
+    imu.push([t, a.x, a.y, a.z, r ? r.alpha : 0, r ? r.beta : 0, r ? r.gamma : 0]);
+    if (phase.startsWith('still') && stillRateSamples.length < 2000) stillRateSamples.push(t);
+  }
+  document.addEventListener('visibilitychange', () => { if (running && document.hidden) { counts.gaps++; ev('gap', null, { key: 'hidden' }); } });
+
+  // ---------- pointer events on the whole page ----------
+  function targetOf(e) {
+    if (phase.startsWith('type') && layout) { const r = ui.kb.getBoundingClientRect(); if (e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom) { const k = hitKey(e.clientX - r.left, e.clientY - r.top); return k ? 'key:' + k.key : 'keyboard'; } }
+    const el = e.target && e.target.closest ? e.target.closest('[data-target]') : null;
+    return el ? el.dataset.target : (e.target && e.target.tagName ? e.target.tagName.toLowerCase() : '');
+  }
+  function ptr(kind, e) {
+    if (!running) return;
+    ev(kind, e, { x_px: e.clientX, y_px: e.clientY, x_frac: e.clientX / window.innerWidth, y_frac: e.clientY / window.innerHeight, pointer_id: e.pointerId, pressure: e.pressure, width: e.width, height: e.height, target: targetOf(e) });
+  }
+  document.addEventListener('pointerdown', e => { ptr('down', e); if (phase.startsWith('type')) onKeyDown(e); if (phase.startsWith('swipe')) strokeStart = { x: e.clientX, y: e.clientY, id: e.pointerId }; }, { capture: true });
+  document.addEventListener('pointermove', e => { if (e.buttons || e.pointerType === 'touch') ptr('move', e); }, { capture: true, passive: true });
+  document.addEventListener('pointerup', e => { ptr('up', e); if (phase.startsWith('type')) onKeyUp(e); if (phase.startsWith('swipe')) endStroke(e); counts.taps++; }, { capture: true });
+  document.addEventListener('pointercancel', e => { ptr('cancel', e); if (phase.startsWith('type')) onKeyUp(e); strokeStart = null; }, { capture: true });
+  ui.article.addEventListener('scroll', e => { if (running) ev('scroll', e, { scroll_y: ui.article.scrollTop, target: 'article' }); }, { passive: true });
+
+  // ---------- keyboard ----------
+  function buildLayout() {
+    const W = ui.kb.clientWidth, H = ui.kb.clientHeight, rowH = H / 4, kw = W / 10, gap = 3, kh = rowH - gap * 2, L = [];
+    ROWS.forEach((r, ri) => { const off = ri === 1 ? kw / 2 : ri === 2 ? kw * 1.5 : 0; [...r].forEach((ch, ci) => L.push({ key: ch, row: ri, col: ci, x: off + ci * kw + gap, y: ri * rowH + gap, w: kw - gap * 2, h: kh })); });
+    L.push({ key: 'backspace', row: 2, col: 7, x: 8.5 * kw + gap, y: 2 * rowH + gap, w: 1.5 * kw - gap * 2, h: kh });
+    L.push({ key: 'space', row: 3, col: 0, x: 2.5 * kw + gap, y: 3 * rowH + gap, w: 5 * kw - gap * 2, h: kh });
+    layout = { W, H, keys: L };
+  }
+  function hitKey(x, y) {
+    if (!layout) buildLayout();
+    for (const k of layout.keys) if (x >= k.x && x <= k.x + k.w && y >= k.y && y <= k.y + k.h) return k;
+    let best = null, bd = Infinity;
+    for (const k of layout.keys) { const d = Math.hypot(x - (k.x + k.w / 2), y - (k.y + k.h / 2)); if (d < bd) { bd = d; best = k; } }
+    return bd < 30 ? best : null;
+  }
+  function drawKb() {
+    if (!layout) buildLayout();
+    const dpr = window.devicePixelRatio || 1, c = ui.kb, W = Math.round(layout.W * dpr), H = Math.round(layout.H * dpr);
+    if (c.width !== W || c.height !== H) { c.width = W; c.height = H; }
+    const ctx = c.getContext('2d'); ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.clearRect(0, 0, layout.W, layout.H);
+    for (const k of layout.keys) {
+      const isP = pressed.has(k.key);
+      ctx.fillStyle = isP ? '#14213D' : (k.key.length > 1 ? '#B6C1CE' : '#FFFFFF');
+      ctx.beginPath(); ctx.roundRect ? ctx.roundRect(k.x, k.y, k.w, k.h, 6) : ctx.rect(k.x, k.y, k.w, k.h); ctx.fill();
+      ctx.fillStyle = isP ? '#fff' : '#14213D'; ctx.font = (k.key.length > 1 ? '13px' : '20px') + ' "Avenir Next", "Segoe UI", Roboto, system-ui, sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText(k.key === 'backspace' ? 'del' : k.key, k.x + k.w / 2, k.y + k.h / 2);
+    }
+  }
+  const activeKeys = new Map();
+  function onKeyDown(e) {
+    const r = ui.kb.getBoundingClientRect(); const x = e.clientX - r.left, y = e.clientY - r.top;
+    if (x < 0 || y < 0 || x > r.width || y > r.height) return;
+    const k = hitKey(x, y); if (!k) return;
+    e.preventDefault();
+    activeKeys.set(e.pointerId, k); pressed.add(k.key); drawKb();
+    ev('key', e, { key: k.key, row: k.row, col: k.col, pointer_id: e.pointerId, x_px: e.clientX, y_px: e.clientY, x_frac: x / r.width, y_frac: y / r.height, target: 'key:' + k.key });
+    counts.keys++;
+    if (k.key === 'backspace') text = text.slice(0, -1); else if (k.key === 'space') text += ' '; else text += k.key;
+    if (text.length >= SENTENCE.length) { sentenceIdx++; text = ''; if (sentenceIdx >= REPEATS) { renderType(); endPhase(); return; } }
+    renderType();
+  }
+  function onKeyUp(e) { const k = activeKeys.get(e.pointerId); if (k) { activeKeys.delete(e.pointerId); pressed.delete(k.key); drawKb(); } }
+  function renderType() { ui.target.textContent = 'Sentence ' + Math.min(REPEATS, sentenceIdx + 1) + ' of ' + REPEATS + ': ' + SENTENCE; ui.typed.textContent = text + '\u258F'; }
+
+  // ---------- article ----------
+  function buildArticle() {
+    const topics = ['tides', 'bread', 'lighthouses', 'glaciers', 'clockmaking', 'beekeeping', 'canals', 'copper', 'wind', 'orchards'];
+    const frag = document.createDocumentFragment();
+    for (let i = 0; i < 40; i++) {
+      const h = document.createElement('h2'); h.textContent = 'Part ' + (i + 1) + ': on ' + topics[i % topics.length]; frag.appendChild(h);
+      for (let p = 0; p < 3; p++) { const el = document.createElement('p'); el.textContent = para(i * 3 + p); frag.appendChild(el); }
+    }
+    ui.article.innerHTML = ''; ui.article.appendChild(frag);
+  }
+  function para(seed) {
+    const s = ['The morning light came slowly over the water and the boats turned with it.', 'Nobody remembered when the practice began, only that it had always been done this way.', 'The work was slow and the tools were old, but the results were reliable.', 'Each season brought its own small adjustments, noticed by those who paid attention.', 'It is easy to forget how much depends on things that are rarely seen.', 'The path bends twice before it reaches the top, and the second bend is the steeper one.', 'A good measurement is one that can be repeated by someone who was not there the first time.', 'Some things are learned by reading and some only by holding the tool.'];
+    let out = []; for (let k = 0; k < 6; k++) out.push(s[(seed * 3 + k * 5) % s.length]); return out.join(' ');
+  }
+
+  // ---------- swipe cards ----------
+  function nextSwipePrompt() {
+    swipeDir = Math.random() < 0.5 ? 'left' : 'right';
+    ui.arrow.textContent = swipeDir === 'left' ? '\u2190' : '\u2192';
+    ui.cardPrompt.textContent = 'Swipe ' + swipeDir;
+    ui.cardCount.textContent = swipeCount + ' of ' + SWIPES;
+  }
+  function endStroke(e) {
+    if (!strokeStart || strokeStart.id !== e.pointerId) { strokeStart = null; return; }
+    const dx = e.clientX - strokeStart.x, dy = e.clientY - strokeStart.y; strokeStart = null;
+    if (Math.abs(dx) < 40 || Math.abs(dx) < Math.abs(dy)) return;
+    const dir = dx > 0 ? 'right' : 'left';
+    counts.strokes++; swipeCount++;
+    ev('stroke', e, { key: dir, target: 'card', x_px: dx, y_px: dy });
+    if (swipeCount >= SWIPES) { endPhase(); return; }
+    nextSwipePrompt();
+  }
+
+  // ---------- sequence ----------
+  function buildSeq() {
+    const block = p => [['still_' + p, p, 'still'], ['type_' + p, p, 'type'], ['scroll_' + p, p, 'scroll'], ['swipe_' + p, p, 'swipe']];
+    seq = [...block('sit'), ...block('walk')];
+    if (ui.standing.checked) seq.push(...block('stand'));
+  }
+  const INSTR = {
+    still: { sit: 'Sit and hold the phone as if reading. Do nothing for 30 seconds.', walk: 'Walk at your normal pace holding the phone as if about to use it.', stand: 'Stand and hold the phone as if reading. Do nothing.' },
+    type: { sit: 'Type the sentence three times. Typos are fine.', walk: 'Keep walking and type the sentence three times.', stand: 'Type the sentence three times.' },
+    scroll: { sit: 'Read the article, scrolling naturally, for 60 seconds.', walk: 'Keep walking and read the article, scrolling naturally.', stand: 'Read the article, scrolling naturally.' },
+    swipe: { sit: 'Swipe the card in the direction shown, 40 times.', walk: 'Keep walking and swipe the card as shown, 40 times.', stand: 'Swipe the card as shown, 40 times.' },
+  };
+  function showBox(kind) { for (const b of ['stillBox', 'typeBox', 'scrollBox', 'swipeBox']) ui[b].classList.add('hidden'); if (kind) ui[kind + 'Box'].classList.remove('hidden'); }
+  function startNext() {
+    seqIdx++;
+    if (seqIdx >= seq.length) { finishSession(); return; }
+    const [name, post, kind] = seq[seqIdx];
+    phase = ''; posture = post;
+    ui.phaseName.textContent = name.replace('_', ', '); ui.phaseSub.textContent = INSTR[kind][post];
+    ui.banner.style.background = post === 'walk' ? '#D0342C' : post === 'stand' ? '#3AA76D' : '#2F6B9A';
+    showBox(null); ui.countdown.classList.remove('hidden');
+    let n = COUNTDOWN_S; ui.countdown.textContent = n;
+    ev('countdown', null, { key: name });
+    const cd = setInterval(() => { n--; if (n > 0) ui.countdown.textContent = n; else { clearInterval(cd); ui.countdown.classList.add('hidden'); beginPhase(name, post, kind); } }, 1000);
+  }
+  function beginPhase(name, post, kind) {
+    phase = name; posture = post; phaseStartT = performance.now();
+    ev('phase_start', null, { key: name });
+    showBox(kind);
+    if (kind === 'still') { ui.stillText.textContent = INSTR.still[post]; let left = STILL_S; ui.stillTimer.textContent = left; tickTimer = setInterval(() => { left--; ui.stillTimer.textContent = left; if (left <= 0) endPhase(); }, 1000); }
+    if (kind === 'type') { text = ''; sentenceIdx = 0; activeKeys.clear(); pressed.clear(); layout = null; buildLayout(); drawKb(); renderType(); phaseTimer = setTimeout(endPhase, TYPE_MAX_S * 1000); }
+    if (kind === 'scroll') { ui.article.scrollTop = 0; phaseTimer = setTimeout(endPhase, SCROLL_S * 1000); }
+    if (kind === 'swipe') { swipeCount = 0; nextSwipePrompt(); phaseTimer = setTimeout(endPhase, SWIPE_MAX_S * 1000); }
+  }
+  function endPhase() {
+    if (!phase) return;
+    clearTimeout(phaseTimer); clearInterval(tickTimer); phaseTimer = null; tickTimer = null;
+    phaseDurations[phase] = Math.round(performance.now() - phaseStartT);
+    ev('phase_end', null, { key: phase });
+    phase = '';
+    startNext();
+  }
+
+  // ---------- session ----------
+  function setChoice(container, list, current, onPick) {
+    container.innerHTML = '';
+    for (const item of list) { const b = document.createElement('button'); b.textContent = item[1]; b.setAttribute('aria-pressed', String(item[0] === current)); b.addEventListener('click', () => { onPick(item[0]); for (const bb of container.children) bb.setAttribute('aria-pressed', String(bb === b)); }); container.appendChild(b); }
+  }
+  setChoice(ui.grips, GRIPS, grip, g => { grip = g; ui.gripHint.textContent = GRIPS.find(x => x[0] === g)[2]; }); ui.gripHint.textContent = GRIPS[0][2];
+  setChoice(ui.hands, HANDS, hand, h => { hand = h; });
+
+  async function startSession() {
+    const person = ui.person.value.trim(); if (!person) { status('Enter a person code first.'); return; }
+    if (typeof DeviceMotionEvent === 'undefined') { status('This browser does not expose motion sensors.'); return; }
+    if (typeof DeviceMotionEvent.requestPermission === 'function') {
+      try { const r = await DeviceMotionEvent.requestPermission(); if (r !== 'granted') { status('Motion access was refused. Reload and allow it.'); return; } }
+      catch (err) { status('Motion access could not be requested. Open the page over HTTPS.'); return; }
+    }
+    if (!window.isSecureContext) { status('Not on HTTPS, so the browser will not deliver sensor data.'); return; }
+    running = true; imu.length = 0; events.length = 0; lastImuT = null; motionCount = 0; stillRateSamples = [];
+    window.addEventListener('devicemotion', onMotion);
+    try { if (navigator.wakeLock) wakeLock = await navigator.wakeLock.request('screen'); } catch (err) {}
+    if (!navigator.wakeLock) status('Keep the screen awake for the session.');
+    buildArticle(); buildSeq(); seqIdx = -1;
+    ui.setup.classList.add('hidden'); ui.run.classList.remove('hidden');
+    ev('session_start', null, { key: person });
+    setTimeout(() => { if (motionCount === 0) status('No motion data is arriving. Check HTTPS and motion access.'); }, 3000);
+    startNext();
+  }
+  function finishSession() {
+    running = false; phase = '';
+    window.removeEventListener('devicemotion', onMotion);
+    if (wakeLock) { wakeLock.release().catch(() => {}); wakeLock = null; }
+    ui.run.classList.add('hidden'); ui.done.classList.remove('hidden');
+    ui.doneSub.textContent = imu.length + ' motion samples, ' + counts.keys + ' keys, ' + counts.strokes + ' strokes, ' + counts.gaps + ' gaps.';
+  }
+  function rateHz() {
+    if (stillRateSamples.length < 20) return null;
+    const iv = []; for (let i = 1; i < stillRateSamples.length; i++) iv.push(stillRateSamples[i] - stillRateSamples[i - 1]); iv.sort((a, b) => a - b);
+    return Math.round(1000 / iv[Math.floor(iv.length / 2)] * 10) / 10;
+  }
+  function meta() {
+    return { version: VERSION, person: ui.person.value.trim(), session: Number(ui.session.value), date: new Date().toISOString(), grip, swipe_hand: hand, device: navigator.userAgent, os: navigator.platform || '',
+      rate_hz: rateHz(), phase_durations_ms: phaseDurations, counts, imu_samples: imu.length, events: events.length, sentence: SENTENCE, standing_block: ui.standing.checked, viewport: [window.innerWidth, window.innerHeight] };
+  }
+  function download(name, textData) {
+    const blob = new Blob([textData], { type: 'text/csv' }); const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob); a.download = name; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 3000);
+  }
+  function saveFiles() {
+    const m = meta(), prefix = 'paired_v' + VERSION + '_' + m.person + '_' + m.session + '_';
+    const f = (v, d) => v == null || v === '' || !isFinite(v) ? '' : Number(v).toFixed(d);
+    const imuRows = ['t_ms,ax,ay,az,gx,gy,gz'];
+    for (const s of imu) imuRows.push([s[0].toFixed(1), f(s[1], 4), f(s[2], 4), f(s[3], 4), f(s[4], 3), f(s[5], 3), f(s[6], 3)].join(','));
+    imuRows.push('# meta ' + JSON.stringify(m));
+    const cols = ['t_ms', 'phase', 'posture', 'kind', 'x_px', 'y_px', 'x_frac', 'y_frac', 'pointer_id', 'pressure', 'width', 'height', 'target', 'key', 'row', 'col', 'scroll_y'];
+    const evRows = [cols.join(',')];
+    for (const e of events) evRows.push(cols.map(c => { const v = e[c]; if (v == null) return ''; if (typeof v === 'number') return c === 't_ms' ? v.toFixed(1) : (Number.isInteger(v) ? String(v) : v.toFixed(4)); return String(v).replace(/,/g, ';'); }).join(','));
+    evRows.push('# meta ' + JSON.stringify(m));
+    download(prefix + 'imu.csv', imuRows.join('\n'));
+    setTimeout(() => download(prefix + 'events.csv', evRows.join('\n')), 800);
+    ui.saveStatus.textContent = 'Two files offered: ' + prefix + 'imu.csv and ' + prefix + 'events.csv. If the phone only shows one, tap Save again.';
+  }
+  ui.startBtn.addEventListener('click', startSession);
+  ui.skipBtn.addEventListener('click', () => { if (phase) endPhase(); });
+  ui.abortBtn.addEventListener('click', () => { if (phase) { clearTimeout(phaseTimer); clearInterval(tickTimer); phaseDurations[phase] = Math.round(performance.now() - phaseStartT); ev('phase_end', null, { key: phase + ':aborted' }); } seqIdx = seq.length; finishSession(); });
+  ui.saveBtn.addEventListener('click', saveFiles);
+  ui.ver.textContent = 'v' + VERSION;
+})();
+</script>
+</body>
+</html>
