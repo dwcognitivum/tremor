@@ -86,7 +86,7 @@
 
 <div id="done" class="hidden">
   <div class="banner" style="background:#2E8B57"><b>Session complete</b><span id="doneSub"></span></div>
-  <div class="row" style="margin-top:12px"><button class="primary" id="saveBtn">Save both files</button></div>
+  <div class="row" style="margin-top:12px"><button class="primary" id="saveImuBtn">1. Save motion file</button><button class="primary" id="saveEvBtn">2. Save events file</button></div>
   <p class="status" id="saveStatus"></p>
 </div>
 
@@ -95,7 +95,7 @@
 
 <script>
 (() => {
-  const VERSION = 1;
+  const VERSION = 2;
   const SENTENCE = 'the quick brown fox jumps over the lazy dog';
   const REPEATS = 3, STILL_S = 30, SCROLL_S = 60, SWIPES = 40, TYPE_MAX_S = 180, SWIPE_MAX_S = 120, COUNTDOWN_S = 3, GAP_MS = 250;
   const GRIPS = [['one_right', 'One hand, right thumb', 'Hold the phone in your right hand and type with your right thumb.'], ['one_left', 'One hand, left thumb', 'Hold the phone in your left hand and type with your left thumb.'],
@@ -105,7 +105,7 @@
 
   const $ = id => document.getElementById(id);
   const ui = {};
-  for (const id of ['setup', 'run', 'done', 'person', 'session', 'grips', 'gripHint', 'hands', 'standing', 'startBtn', 'banner', 'phaseName', 'phaseSub', 'countdown', 'stillBox', 'stillTimer', 'stillText', 'typeBox', 'target', 'typed', 'kb', 'scrollBox', 'article', 'swipeBox', 'cards', 'arrow', 'cardPrompt', 'cardCount', 'skipBtn', 'abortBtn', 'saveBtn', 'saveStatus', 'status', 'ver', 'doneSub']) ui[id] = $(id);
+  for (const id of ['setup', 'run', 'done', 'saveImuBtn', 'saveEvBtn', 'person', 'session', 'grips', 'gripHint', 'hands', 'standing', 'startBtn', 'banner', 'phaseName', 'phaseSub', 'countdown', 'stillBox', 'stillTimer', 'stillText', 'typeBox', 'target', 'typed', 'kb', 'scrollBox', 'article', 'swipeBox', 'cards', 'arrow', 'cardPrompt', 'cardCount', 'skipBtn', 'abortBtn', 'saveStatus', 'status', 'ver', 'doneSub']) ui[id] = $(id);
   const status = m => { ui.status.textContent = m; };
   const nowMs = e => (e && e.timeStamp && e.timeStamp < 1e12) ? e.timeStamp : performance.now();
 
@@ -319,24 +319,31 @@
     const blob = new Blob([textData], { type: 'text/csv' }); const a = document.createElement('a');
     a.href = URL.createObjectURL(blob); a.download = name; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 3000);
   }
-  function saveFiles() {
-    const m = meta(), prefix = 'paired_v' + VERSION + '_' + m.person + '_' + m.session + '_';
+  // one file per tap: iOS shows a share sheet per download, and a second download fired from the same tap dismisses the first
+  function prefixName() { const m = meta(); return ['paired_v' + VERSION + '_' + m.person + '_' + m.session + '_', m]; }
+  function saveImu() {
+    const [prefix, m] = prefixName();
     const f = (v, d) => v == null || v === '' || !isFinite(v) ? '' : Number(v).toFixed(d);
-    const imuRows = ['t_ms,ax,ay,az,gx,gy,gz'];
-    for (const s of imu) imuRows.push([s[0].toFixed(1), f(s[1], 4), f(s[2], 4), f(s[3], 4), f(s[4], 3), f(s[5], 3), f(s[6], 3)].join(','));
-    imuRows.push('# meta ' + JSON.stringify(m));
+    const rows = ['t_ms,ax,ay,az,gx,gy,gz'];
+    for (const s of imu) rows.push([s[0].toFixed(1), f(s[1], 4), f(s[2], 4), f(s[3], 4), f(s[4], 3), f(s[5], 3), f(s[6], 3)].join(','));
+    rows.push('# meta ' + JSON.stringify(m));
+    download(prefix + 'imu.csv', rows.join('\n'));
+    ui.saveStatus.textContent = prefix + 'imu.csv offered (' + imu.length + ' samples, about ' + Math.round(rows.join('\n').length / 1024) + ' kB). Now tap 2.';
+  }
+  function saveEvents() {
+    const [prefix, m] = prefixName();
     const cols = ['t_ms', 'phase', 'posture', 'kind', 'x_px', 'y_px', 'x_frac', 'y_frac', 'pointer_id', 'pressure', 'width', 'height', 'target', 'key', 'row', 'col', 'scroll_y'];
-    const evRows = [cols.join(',')];
-    for (const e of events) evRows.push(cols.map(c => { const v = e[c]; if (v == null) return ''; if (typeof v === 'number') return c === 't_ms' ? v.toFixed(1) : (Number.isInteger(v) ? String(v) : v.toFixed(4)); return String(v).replace(/,/g, ';'); }).join(','));
-    evRows.push('# meta ' + JSON.stringify(m));
-    download(prefix + 'imu.csv', imuRows.join('\n'));
-    setTimeout(() => download(prefix + 'events.csv', evRows.join('\n')), 800);
-    ui.saveStatus.textContent = 'Two files offered: ' + prefix + 'imu.csv and ' + prefix + 'events.csv. If the phone only shows one, tap Save again.';
+    const rows = [cols.join(',')];
+    for (const e of events) rows.push(cols.map(c => { const v = e[c]; if (v == null) return ''; if (typeof v === 'number') return c === 't_ms' ? v.toFixed(1) : (Number.isInteger(v) ? String(v) : v.toFixed(4)); return String(v).replace(/,/g, ';'); }).join(','));
+    rows.push('# meta ' + JSON.stringify(m));
+    download(prefix + 'events.csv', rows.join('\n'));
+    ui.saveStatus.textContent = prefix + 'events.csv offered (' + events.length + ' events). Both files can be saved again from these buttons.';
   }
   ui.startBtn.addEventListener('click', startSession);
   ui.skipBtn.addEventListener('click', () => { if (phase) endPhase(); });
   ui.abortBtn.addEventListener('click', () => { if (phase) { clearTimeout(phaseTimer); clearInterval(tickTimer); phaseDurations[phase] = Math.round(performance.now() - phaseStartT); ev('phase_end', null, { key: phase + ':aborted' }); } seqIdx = seq.length; finishSession(); });
-  ui.saveBtn.addEventListener('click', saveFiles);
+  ui.saveImuBtn.addEventListener('click', saveImu);
+  ui.saveEvBtn.addEventListener('click', saveEvents);
   ui.ver.textContent = 'v' + VERSION;
 })();
 </script>
