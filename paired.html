@@ -45,10 +45,11 @@
   .task .target { font-size: 15px; color: var(--muted); }
   .task .typed { font-size: 19px; min-height: 1.4em; word-break: break-all; }
   #kb { display: block; width: 100%; height: 56vw; max-height: 300px; touch-action: none; background: #CFD6DE; border-radius: 8px; }
-  #article { height: 58vh; overflow-y: auto; -webkit-overflow-scrolling: touch; background: var(--panel); border: 1.5px solid var(--rule); border-radius: 6px; padding: 14px 16px; font-size: 16px; line-height: 1.55; }
+  #article { height: 58vh; overflow: hidden; touch-action: none; position: relative; background: var(--panel); border: 1.5px solid var(--rule); border-radius: 6px; padding: 0; font-size: 16px; line-height: 1.55; user-select: none; -webkit-user-select: none; }
+  #articleInner { padding: 14px 16px; will-change: transform; }
   #article h2 { font-size: 17px; margin: 18px 0 6px; }
   #article p { margin-bottom: 12px; color: #2B3A55; }
-  #cards { height: 44vh; min-height: 300px; border-radius: 8px; background: var(--ink); color: #fff; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; touch-action: none; user-select: none; -webkit-user-select: none; }
+  #cards { height: 52vh; min-height: 360px; border-radius: 8px; background: var(--ink); color: #fff; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; touch-action: none; user-select: none; -webkit-user-select: none; }
   #cards .arrow { font-size: 64px; line-height: 1; }
   #cards .cnt { font-size: 14px; opacity: 0.85; }
   .status { font-size: 14px; color: var(--muted); min-height: 1.4em; }
@@ -79,7 +80,7 @@
     <div class="task"><div class="target" id="target"></div><div class="typed" id="typed"></div></div>
     <canvas id="kb" style="margin-top:10px"></canvas>
   </div>
-  <div id="scrollBox" class="hidden"><div id="article" data-target="article"></div></div>
+  <div id="scrollBox" class="hidden"><div id="article" data-target="article"><div id="articleInner"></div></div></div>
   <div id="swipeBox" class="hidden"><div id="cards" data-target="card"><div class="arrow" id="arrow"></div><div id="cardPrompt"></div><div class="cnt" id="cardCount"></div></div></div>
   <div class="row" style="margin-top:10px"><button class="secondary" id="skipBtn" style="flex:1">Skip phase</button><button class="secondary" id="abortBtn" style="flex:1">Stop and save</button></div>
 </div>
@@ -95,7 +96,9 @@
 
 <script>
 (() => {
-  const VERSION = 2;
+  const VERSION = 3;
+  const IOS = /iP(hone|ad|od)/.test(navigator.userAgent);
+  const MIN_SWIPE = 150;   // px of travel for a card swipe to count; long enough for 250 ms strokes
   const SENTENCE = 'the quick brown fox jumps over the lazy dog';
   const REPEATS = 3, STILL_S = 30, SCROLL_S = 60, SWIPES = 40, TYPE_MAX_S = 180, SWIPE_MAX_S = 120, COUNTDOWN_S = 3, GAP_MS = 250;
   const GRIPS = [['one_right', 'One hand, right thumb', 'Hold the phone in your right hand and type with your right thumb.'], ['one_left', 'One hand, left thumb', 'Hold the phone in your left hand and type with your left thumb.'],
@@ -105,7 +108,7 @@
 
   const $ = id => document.getElementById(id);
   const ui = {};
-  for (const id of ['setup', 'run', 'done', 'saveImuBtn', 'saveEvBtn', 'person', 'session', 'grips', 'gripHint', 'hands', 'standing', 'startBtn', 'banner', 'phaseName', 'phaseSub', 'countdown', 'stillBox', 'stillTimer', 'stillText', 'typeBox', 'target', 'typed', 'kb', 'scrollBox', 'article', 'swipeBox', 'cards', 'arrow', 'cardPrompt', 'cardCount', 'skipBtn', 'abortBtn', 'saveStatus', 'status', 'ver', 'doneSub']) ui[id] = $(id);
+  for (const id of ['setup', 'run', 'done', 'saveImuBtn', 'saveEvBtn', 'person', 'session', 'grips', 'gripHint', 'hands', 'standing', 'startBtn', 'banner', 'phaseName', 'phaseSub', 'countdown', 'stillBox', 'stillTimer', 'stillText', 'typeBox', 'target', 'typed', 'kb', 'scrollBox', 'article', 'articleInner', 'swipeBox', 'cards', 'arrow', 'cardPrompt', 'cardCount', 'skipBtn', 'abortBtn', 'saveStatus', 'status', 'ver', 'doneSub']) ui[id] = $(id);
   const status = m => { ui.status.textContent = m; };
   const nowMs = e => (e && e.timeStamp && e.timeStamp < 1e12) ? e.timeStamp : performance.now();
 
@@ -145,13 +148,39 @@
   }
   function ptr(kind, e) {
     if (!running) return;
-    ev(kind, e, { x_px: e.clientX, y_px: e.clientY, x_frac: e.clientX / window.innerWidth, y_frac: e.clientY / window.innerHeight, pointer_id: e.pointerId, pressure: e.pressure, width: e.width, height: e.height, target: targetOf(e) });
+    ev(kind, e, { x_px: e.clientX, y_px: e.clientY, x_frac: e.clientX / window.innerWidth, y_frac: e.clientY / window.innerHeight, pointer_id: e.pointerId, pressure: IOS ? null : e.pressure, width: IOS ? null : e.width, height: IOS ? null : e.height, target: targetOf(e) });
   }
-  document.addEventListener('pointerdown', e => { ptr('down', e); if (phase.startsWith('type')) onKeyDown(e); if (phase.startsWith('swipe')) strokeStart = { x: e.clientX, y: e.clientY, id: e.pointerId }; }, { capture: true });
-  document.addEventListener('pointermove', e => { if (e.buttons || e.pointerType === 'touch') ptr('move', e); }, { capture: true, passive: true });
-  document.addEventListener('pointerup', e => { ptr('up', e); if (phase.startsWith('type')) onKeyUp(e); if (phase.startsWith('swipe')) endStroke(e); counts.taps++; }, { capture: true });
-  document.addEventListener('pointercancel', e => { ptr('cancel', e); if (phase.startsWith('type')) onKeyUp(e); strokeStart = null; }, { capture: true });
-  ui.article.addEventListener('scroll', e => { if (running) ev('scroll', e, { scroll_y: ui.article.scrollTop, target: 'article' }); }, { passive: true });
+  document.addEventListener('pointerdown', e => { ptr('down', e); if (phase.startsWith('type')) onKeyDown(e); if (phase.startsWith('swipe')) strokeStart = { x: e.clientX, y: e.clientY, id: e.pointerId }; if (phase.startsWith('scroll')) scrollDown(e); }, { capture: true });
+  document.addEventListener('pointermove', e => { if (e.buttons || e.pointerType === 'touch') ptr('move', e); if (phase.startsWith('scroll')) scrollMove(e); }, { capture: true, passive: true });
+  document.addEventListener('pointerup', e => { ptr('up', e); if (phase.startsWith('type')) onKeyUp(e); if (phase.startsWith('swipe')) endStroke(e); if (phase.startsWith('scroll')) scrollUp(e); counts.taps++; }, { capture: true });
+  document.addEventListener('pointercancel', e => { ptr('cancel', e); if (phase.startsWith('type')) onKeyUp(e); strokeStart = null; if (phase.startsWith('scroll')) scrollUp(e); }, { capture: true });
+  // page-driven scrolling: the browser never scrolls, so devicemotion keeps running and pointer moves keep arriving
+  const sc = { y: 0, max: 0, drag: null, v: 0, raf: null, lastT: 0 };
+  function setScroll(y, e) {
+    sc.y = Math.max(0, Math.min(sc.max, y)); ui.articleInner.style.transform = 'translateY(' + (-sc.y) + 'px)';
+    if (running) ev('scroll', e, { scroll_y: sc.y, target: 'article' });
+  }
+  function scrollDown(e) { if (!phase.startsWith('scroll')) return; cancelAnimationFrame(sc.raf); sc.raf = null; sc.drag = { id: e.pointerId, y0: sc.y, py: e.clientY, t: nowMs(e), v: 0 }; sc.v = 0; }
+  function scrollMove(e) {
+    if (!sc.drag || sc.drag.id !== e.pointerId) return;
+    const t = nowMs(e), dt = t - sc.drag.t;
+    const y = sc.drag.y0 + (sc.drag.py - e.clientY);
+    if (dt > 0) sc.v = 0.7 * sc.v + 0.3 * ((y - sc.y) / dt * 1000);   // px per second, smoothed
+    sc.drag.t = t; setScroll(y, e);
+  }
+  function scrollUp(e) {
+    if (!sc.drag || sc.drag.id !== e.pointerId) return;
+    sc.drag = null;
+    if (Math.abs(sc.v) < 60) return;
+    sc.lastT = performance.now();
+    const step = () => {
+      const now = performance.now(), dt = (now - sc.lastT) / 1000; sc.lastT = now;
+      sc.v *= Math.pow(0.05, dt);                       // momentum decays over about a second
+      setScroll(sc.y + sc.v * dt, null);
+      if (Math.abs(sc.v) > 30 && sc.y > 0 && sc.y < sc.max) sc.raf = requestAnimationFrame(step); else sc.raf = null;
+    };
+    sc.raf = requestAnimationFrame(step);
+  }
 
   // ---------- keyboard ----------
   function buildLayout() {
@@ -205,7 +234,7 @@
       const h = document.createElement('h2'); h.textContent = 'Part ' + (i + 1) + ': on ' + topics[i % topics.length]; frag.appendChild(h);
       for (let p = 0; p < 3; p++) { const el = document.createElement('p'); el.textContent = para(i * 3 + p); frag.appendChild(el); }
     }
-    ui.article.innerHTML = ''; ui.article.appendChild(frag);
+    ui.articleInner.innerHTML = ''; ui.articleInner.appendChild(frag);
   }
   function para(seed) {
     const s = ['The morning light came slowly over the water and the boats turned with it.', 'Nobody remembered when the practice began, only that it had always been done this way.', 'The work was slow and the tools were old, but the results were reliable.', 'Each season brought its own small adjustments, noticed by those who paid attention.', 'It is easy to forget how much depends on things that are rarely seen.', 'The path bends twice before it reaches the top, and the second bend is the steeper one.', 'A good measurement is one that can be repeated by someone who was not there the first time.', 'Some things are learned by reading and some only by holding the tool.'];
@@ -213,17 +242,20 @@
   }
 
   // ---------- swipe cards ----------
+  let swipePlan = [];
   function nextSwipePrompt() {
-    swipeDir = Math.random() < 0.5 ? 'left' : 'right';
-    ui.arrow.textContent = swipeDir === 'left' ? '\u2190' : '\u2192';
-    ui.cardPrompt.textContent = 'Swipe ' + swipeDir;
+    if (!swipePlan.length) { swipePlan = []; for (let k = 0; k < SWIPES / 4; k++) swipePlan.push('left', 'right', 'up', 'down'); for (let i = swipePlan.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [swipePlan[i], swipePlan[j]] = [swipePlan[j], swipePlan[i]]; } }
+    swipeDir = swipePlan[swipeCount] || 'left';
+    ui.arrow.textContent = { left: '\u2190', right: '\u2192', up: '\u2191', down: '\u2193' }[swipeDir];
+    ui.cardPrompt.textContent = 'Swipe ' + swipeDir + ', a long unhurried stroke';
     ui.cardCount.textContent = swipeCount + ' of ' + SWIPES;
   }
   function endStroke(e) {
     if (!strokeStart || strokeStart.id !== e.pointerId) { strokeStart = null; return; }
     const dx = e.clientX - strokeStart.x, dy = e.clientY - strokeStart.y; strokeStart = null;
-    if (Math.abs(dx) < 40 || Math.abs(dx) < Math.abs(dy)) return;
-    const dir = dx > 0 ? 'right' : 'left';
+    const horizontal = Math.abs(dx) > Math.abs(dy), len = horizontal ? Math.abs(dx) : Math.abs(dy);
+    if (len < MIN_SWIPE) { ui.cardPrompt.textContent = 'Longer: swipe ' + swipeDir + ' across most of the card'; return; }
+    const dir = horizontal ? (dx > 0 ? 'right' : 'left') : (dy > 0 ? 'down' : 'up');
     counts.strokes++; swipeCount++;
     ev('stroke', e, { key: dir, target: 'card', x_px: dx, y_px: dy });
     if (swipeCount >= SWIPES) { endPhase(); return; }
@@ -239,8 +271,8 @@
   const INSTR = {
     still: { sit: 'Sit and hold the phone as if reading. Do nothing for 30 seconds.', walk: 'Walk at your normal pace holding the phone as if about to use it.', stand: 'Stand and hold the phone as if reading. Do nothing.' },
     type: { sit: 'Type the sentence three times. Typos are fine.', walk: 'Keep walking and type the sentence three times.', stand: 'Type the sentence three times.' },
-    scroll: { sit: 'Read the article, scrolling naturally, for 60 seconds.', walk: 'Keep walking and read the article, scrolling naturally.', stand: 'Read the article, scrolling naturally.' },
-    swipe: { sit: 'Swipe the card in the direction shown, 40 times.', walk: 'Keep walking and swipe the card as shown, 40 times.', stand: 'Swipe the card as shown, 40 times.' },
+    scroll: { sit: 'Read the article, scrolling with your thumb as you normally would, for 60 seconds.', walk: 'Keep walking and read the article, scrolling naturally.', stand: 'Read the article, scrolling naturally.' },
+    swipe: { sit: 'Swipe across the card in the direction shown, long unhurried strokes, 40 times.', walk: 'Keep walking and swipe across the card as shown, 40 times.', stand: 'Swipe across the card as shown, 40 times.' },
   };
   function showBox(kind) { for (const b of ['stillBox', 'typeBox', 'scrollBox', 'swipeBox']) ui[b].classList.add('hidden'); if (kind) ui[kind + 'Box'].classList.remove('hidden'); }
   function startNext() {
@@ -261,8 +293,8 @@
     showBox(kind);
     if (kind === 'still') { ui.stillText.textContent = INSTR.still[post]; let left = STILL_S; ui.stillTimer.textContent = left; tickTimer = setInterval(() => { left--; ui.stillTimer.textContent = left; if (left <= 0) endPhase(); }, 1000); }
     if (kind === 'type') { text = ''; sentenceIdx = 0; activeKeys.clear(); pressed.clear(); layout = null; buildLayout(); drawKb(); renderType(); phaseTimer = setTimeout(endPhase, TYPE_MAX_S * 1000); }
-    if (kind === 'scroll') { ui.article.scrollTop = 0; phaseTimer = setTimeout(endPhase, SCROLL_S * 1000); }
-    if (kind === 'swipe') { swipeCount = 0; nextSwipePrompt(); phaseTimer = setTimeout(endPhase, SWIPE_MAX_S * 1000); }
+    if (kind === 'scroll') { sc.max = Math.max(0, ui.articleInner.scrollHeight - ui.article.clientHeight); setScroll(0, null); phaseTimer = setTimeout(endPhase, SCROLL_S * 1000); }
+    if (kind === 'swipe') { swipeCount = 0; swipePlan = []; nextSwipePrompt(); phaseTimer = setTimeout(endPhase, SWIPE_MAX_S * 1000); }
   }
   function endPhase() {
     if (!phase) return;
