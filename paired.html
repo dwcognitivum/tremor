@@ -52,6 +52,9 @@
   #cards { height: 52vh; min-height: 360px; border-radius: 8px; background: var(--ink); color: #fff; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; touch-action: none; user-select: none; -webkit-user-select: none; }
   #cards .arrow { font-size: 64px; line-height: 1; }
   #cards .cnt { font-size: 14px; opacity: 0.85; }
+  #cards { position: relative; }
+  #cards .guide { position: absolute; width: 22px; height: 22px; border-radius: 50%; background: #F2C56B; transform: translate(-50%, -50%); pointer-events: none; }
+  #cards .guide.ring { background: transparent; border: 3px solid #F2C56B; width: 34px; height: 34px; }
   .status { font-size: 14px; color: var(--muted); min-height: 1.4em; }
   .note { font-size: 12px; color: var(--muted); }
   .hidden { display: none !important; }
@@ -81,7 +84,7 @@
     <canvas id="kb" style="margin-top:10px"></canvas>
   </div>
   <div id="scrollBox" class="hidden"><div id="article" data-target="article"><div id="articleInner"></div></div></div>
-  <div id="swipeBox" class="hidden"><div id="cards" data-target="card"><div class="arrow" id="arrow"></div><div id="cardPrompt"></div><div class="cnt" id="cardCount"></div></div></div>
+  <div id="swipeBox" class="hidden"><div id="cards" data-target="card"><div class="guide" id="guideStart"></div><div class="guide ring" id="guideEnd"></div><div class="arrow" id="arrow"></div><div id="cardPrompt"></div><div class="cnt" id="cardCount"></div></div></div>
   <div class="row" style="margin-top:10px"><button class="secondary" id="skipBtn" style="flex:1">Skip phase</button><button class="secondary" id="abortBtn" style="flex:1">Stop and save</button></div>
 </div>
 
@@ -96,9 +99,9 @@
 
 <script>
 (() => {
-  const VERSION = 3;
+  const VERSION = 4;
   const IOS = /iP(hone|ad|od)/.test(navigator.userAgent);
-  const MIN_SWIPE = 150;   // px of travel for a card swipe to count; long enough for 250 ms strokes
+  const MIN_SWIPE = 150, TRAVEL = 220;   // px: minimum travel to count, and the fixed guide distance shown on the card (held constant from v4 on)
   const SENTENCE = 'the quick brown fox jumps over the lazy dog';
   const REPEATS = 3, STILL_S = 30, SCROLL_S = 60, SWIPES = 40, TYPE_MAX_S = 180, SWIPE_MAX_S = 120, COUNTDOWN_S = 3, GAP_MS = 250;
   const GRIPS = [['one_right', 'One hand, right thumb', 'Hold the phone in your right hand and type with your right thumb.'], ['one_left', 'One hand, left thumb', 'Hold the phone in your left hand and type with your left thumb.'],
@@ -108,7 +111,7 @@
 
   const $ = id => document.getElementById(id);
   const ui = {};
-  for (const id of ['setup', 'run', 'done', 'saveImuBtn', 'saveEvBtn', 'person', 'session', 'grips', 'gripHint', 'hands', 'standing', 'startBtn', 'banner', 'phaseName', 'phaseSub', 'countdown', 'stillBox', 'stillTimer', 'stillText', 'typeBox', 'target', 'typed', 'kb', 'scrollBox', 'article', 'articleInner', 'swipeBox', 'cards', 'arrow', 'cardPrompt', 'cardCount', 'skipBtn', 'abortBtn', 'saveStatus', 'status', 'ver', 'doneSub']) ui[id] = $(id);
+  for (const id of ['setup', 'run', 'done', 'saveImuBtn', 'saveEvBtn', 'person', 'session', 'grips', 'gripHint', 'hands', 'standing', 'startBtn', 'banner', 'phaseName', 'phaseSub', 'countdown', 'stillBox', 'stillTimer', 'stillText', 'typeBox', 'target', 'typed', 'kb', 'scrollBox', 'article', 'articleInner', 'swipeBox', 'cards', 'arrow', 'cardPrompt', 'cardCount', 'guideStart', 'guideEnd', 'skipBtn', 'abortBtn', 'saveStatus', 'status', 'ver', 'doneSub']) ui[id] = $(id);
   const status = m => { ui.status.textContent = m; };
   const nowMs = e => (e && e.timeStamp && e.timeStamp < 1e12) ? e.timeStamp : performance.now();
 
@@ -247,14 +250,19 @@
     if (!swipePlan.length) { swipePlan = []; for (let k = 0; k < SWIPES / 4; k++) swipePlan.push('left', 'right', 'up', 'down'); for (let i = swipePlan.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [swipePlan[i], swipePlan[j]] = [swipePlan[j], swipePlan[i]]; } }
     swipeDir = swipePlan[swipeCount] || 'left';
     ui.arrow.textContent = { left: '\u2190', right: '\u2192', up: '\u2191', down: '\u2193' }[swipeDir];
-    ui.cardPrompt.textContent = 'Swipe ' + swipeDir + ', a long unhurried stroke';
+    ui.cardPrompt.textContent = 'Swipe ' + swipeDir + ' from the dot to the ring';
     ui.cardCount.textContent = swipeCount + ' of ' + SWIPES;
+    const r = ui.cards.getBoundingClientRect(), cx = r.width / 2, cy = r.height / 2;
+    const v = { left: [-1, 0], right: [1, 0], up: [0, -1], down: [0, 1] }[swipeDir];
+    const half = Math.min(TRAVEL / 2, (v[0] ? r.width : r.height) / 2 - 30);
+    ui.guideStart.style.left = (cx - v[0] * half) + 'px'; ui.guideStart.style.top = (cy - v[1] * half) + 'px';
+    ui.guideEnd.style.left = (cx + v[0] * half) + 'px'; ui.guideEnd.style.top = (cy + v[1] * half) + 'px';
   }
   function endStroke(e) {
     if (!strokeStart || strokeStart.id !== e.pointerId) { strokeStart = null; return; }
     const dx = e.clientX - strokeStart.x, dy = e.clientY - strokeStart.y; strokeStart = null;
     const horizontal = Math.abs(dx) > Math.abs(dy), len = horizontal ? Math.abs(dx) : Math.abs(dy);
-    if (len < MIN_SWIPE) { ui.cardPrompt.textContent = 'Longer: swipe ' + swipeDir + ' across most of the card'; return; }
+    if (len < MIN_SWIPE) { ui.cardPrompt.textContent = 'Longer: swipe ' + swipeDir + ' from the dot to the ring'; return; }
     const dir = horizontal ? (dx > 0 ? 'right' : 'left') : (dy > 0 ? 'down' : 'up');
     counts.strokes++; swipeCount++;
     ev('stroke', e, { key: dir, target: 'card', x_px: dx, y_px: dy });
@@ -365,8 +373,12 @@
   function saveEvents() {
     const [prefix, m] = prefixName();
     const cols = ['t_ms', 'phase', 'posture', 'kind', 'x_px', 'y_px', 'x_frac', 'y_frac', 'pointer_id', 'pressure', 'width', 'height', 'target', 'key', 'row', 'col', 'scroll_y'];
+    const constant = {};
+    for (const c of ['pressure', 'width', 'height']) { const vals = new Set(events.filter(e => e[c] != null).map(e => Math.round(e[c] * 100))); constant[c] = vals.size <= 1; }
+    m.contact_columns_blanked = Object.keys(constant).filter(c => constant[c]);
     const rows = [cols.join(',')];
-    for (const e of events) rows.push(cols.map(c => { const v = e[c]; if (v == null) return ''; if (typeof v === 'number') return c === 't_ms' ? v.toFixed(1) : (Number.isInteger(v) ? String(v) : v.toFixed(4)); return String(v).replace(/,/g, ';'); }).join(','));
+    for (const e of events) rows.push(cols.map(c => {
+      if (constant[c]) return ''; const v = e[c]; if (v == null) return ''; if (typeof v === 'number') return c === 't_ms' ? v.toFixed(1) : (Number.isInteger(v) ? String(v) : v.toFixed(4)); return String(v).replace(/,/g, ';'); }).join(','));
     rows.push('# meta ' + JSON.stringify(m));
     download(prefix + 'events.csv', rows.join('\n'));
     ui.saveStatus.textContent = prefix + 'events.csv offered (' + events.length + ' events). Both files can be saved again from these buttons.';
