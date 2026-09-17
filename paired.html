@@ -77,6 +77,7 @@
 
 <div id="run" class="hidden">
   <div class="banner" id="banner"><b id="phaseName"></b><span id="phaseSub"></span></div>
+  <div class="row"><button class="secondary" id="skipBtn" style="flex:1;padding:8px 10px;font-size:13px">Skip phase</button><button class="secondary" id="abortBtn" style="flex:1;padding:8px 10px;font-size:13px">Stop and save</button></div>
   <div class="big hidden" id="countdown"></div>
   <div id="stillBox" class="hidden"><div class="big" id="stillTimer"></div><p class="sub" style="text-align:center;margin-top:8px" id="stillText"></p></div>
   <div id="typeBox" class="hidden">
@@ -85,7 +86,7 @@
   </div>
   <div id="scrollBox" class="hidden"><div id="article" data-target="article"><div id="articleInner"></div></div></div>
   <div id="swipeBox" class="hidden"><div id="cards" data-target="card"><div class="guide" id="guideStart"></div><div class="guide ring" id="guideEnd"></div><div class="arrow" id="arrow"></div><div id="cardPrompt"></div><div class="cnt" id="cardCount"></div></div></div>
-  <div class="row" style="margin-top:10px"><button class="secondary" id="skipBtn" style="flex:1">Skip phase</button><button class="secondary" id="abortBtn" style="flex:1">Stop and save</button></div>
+  <p class="note" style="margin-top:8px">Skip and Stop need two taps within two seconds, so a stray touch cannot end a phase.</p>
 </div>
 
 <div id="done" class="hidden">
@@ -99,7 +100,7 @@
 
 <script>
 (() => {
-  const VERSION = 4;
+  const VERSION = 5;
   const IOS = /iP(hone|ad|od)/.test(navigator.userAgent);
   const MIN_SWIPE = 150, TRAVEL = 220;   // px: minimum travel to count, and the fixed guide distance shown on the card (held constant from v4 on)
   const SENTENCE = 'the quick brown fox jumps over the lazy dog';
@@ -307,6 +308,7 @@
   function endPhase() {
     if (!phase) return;
     clearTimeout(phaseTimer); clearInterval(tickTimer); phaseTimer = null; tickTimer = null;
+    if (sc.raf) { cancelAnimationFrame(sc.raf); sc.raf = null; } sc.drag = null; sc.v = 0;
     phaseDurations[phase] = Math.round(performance.now() - phaseStartT);
     ev('phase_end', null, { key: phase });
     phase = '';
@@ -384,8 +386,17 @@
     ui.saveStatus.textContent = prefix + 'events.csv offered (' + events.length + ' events). Both files can be saved again from these buttons.';
   }
   ui.startBtn.addEventListener('click', startSession);
-  ui.skipBtn.addEventListener('click', () => { if (phase) endPhase(); });
-  ui.abortBtn.addEventListener('click', () => { if (phase) { clearTimeout(phaseTimer); clearInterval(tickTimer); phaseDurations[phase] = Math.round(performance.now() - phaseStartT); ev('phase_end', null, { key: phase + ':aborted' }); } seqIdx = seq.length; finishSession(); });
+  // two taps within two seconds; a single stray tap only arms the button
+  function armed(btn, label, action) {
+    let t = 0;
+    btn.addEventListener('click', () => {
+      const now = performance.now();
+      if (now - t < 2000) { t = 0; btn.textContent = label; action(); }
+      else { t = now; btn.textContent = 'Tap again to ' + label.toLowerCase(); setTimeout(() => { if (performance.now() - t >= 1900) { btn.textContent = label; } }, 2100); }
+    });
+  }
+  armed(ui.skipBtn, 'Skip phase', () => { if (phase) { ev('skip', null, { key: phase }); endPhase(); } });
+  armed(ui.abortBtn, 'Stop and save', () => { if (phase) { clearTimeout(phaseTimer); clearInterval(tickTimer); phaseDurations[phase] = Math.round(performance.now() - phaseStartT); ev('phase_end', null, { key: phase + ':aborted' }); } seqIdx = seq.length; finishSession(); });
   ui.saveImuBtn.addEventListener('click', saveImu);
   ui.saveEvBtn.addEventListener('click', saveEvents);
   ui.ver.textContent = 'v' + VERSION;
